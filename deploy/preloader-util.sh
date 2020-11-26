@@ -5,8 +5,6 @@
 #   This script is created for demo purpose.
 #   Usage:
 #       [-p] # Prepare environment
-#           Requirement:
-#                [-a cluster_name] # Specify cluster name
 #       [-c] # clean environment for preloader test
 #       [-e] # Enable preloader pod
 #       [-r] # Run preloader (normal mode: historical + current)
@@ -19,8 +17,6 @@
 #   Standalone options:
 #       [-i] # Install Nginx
 #       [-k] # Remove Nginx
-#       [-b] # Retrigger ab test from preload pod
-#       [-g ab_traffic_ratio] # ab test traffic ratio (default:4000) [e.g., -g 4000]
 #       [-t replica number] # Nginx default replica number (default:10) [e.g., -t 5]
 #       [-s enable execution] # Enable(default) or disable execution [e.g., -s false]
 #
@@ -32,8 +28,6 @@ show_usage()
 
     Usage:
         [-p] # Prepare environment
-            Requirement:
-                [-a cluster_name] # Specify cluster name
         [-c] # clean environment for preloader test
         [-e] # Enable preloader pod
         [-r] # Run preloader (normal mode: historical + current)
@@ -46,8 +40,6 @@ show_usage()
     Standalone options:
         [-i] # Install Nginx
         [-k] # Remove Nginx
-        [-b] # Retrigger ab test from preload pod
-        [-g ab_traffic_ratio] # ab test traffic ratio (default:4000) [e.g., -g 4000]
         [-t replica number] # Nginx default replica number (default:10) [e.g., -t 5]
         [-s enable execution] # Enable(default) or disable execution [e.g., -s false]
 
@@ -211,24 +203,19 @@ delete_all_alamedascaler()
 {
     start=`date +%s`
     echo -e "\n$(tput setaf 6)Deleting old alamedascaler if necessary...$(tput sgr 0)"
-    while read _scaler_name _cluster_name _scaler_ns
+    while read scaler_name scaler_ns
     do
-        if [ "$_scaler_name" = "" ] || [ "$_cluster_name" = "" ] || [ "$_scaler_ns" = "" ]; then
+        if [ "$scaler_name" = "" ] || [ "$scaler_ns" = "" ]; then
            continue
         fi
 
-        if [ "$_scaler_name" = "$_cluster_name" ]; then
-            # Ignore cluster-only alamedascaler
-            continue
-        fi
-
-        kubectl delete alamedascaler $_scaler_name -n $_scaler_ns
+        kubectl delete alamedascaler $scaler_name -n $scaler_ns
         if [ "$?" != "0" ]; then
-            echo -e "\n$(tput setaf 1)Error in deleting old alamedascaler named $_scaler_name in ns $_scaler_ns.$(tput sgr 0)"
+            echo -e "\n$(tput setaf 1)Error in deleting old alamedascaler named $scaler_name in ns $scaler_ns.$(tput sgr 0)"
             leave_prog
             exit 8
         fi
-    done <<< "$(kubectl get alamedascaler --all-namespaces --output jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.clusterName}{" "}{.metadata.namespace}{"\n"}' 2>/dev/null)"
+    done <<< "$(kubectl get alamedascaler --all-namespaces --output jsonpath='{range .items[*]}{"\n"}{.metadata.name}{"\t"}{.metadata.namespace}' 2>/dev/null)"
     echo "Done"
     end=`date +%s`
     duration=$((end-start))
@@ -266,39 +253,9 @@ wait_for_cluster_status_data_ready()
     echo "Duration wait_for_cluster_status_data_ready = $duration" >> $debug_log
 }
 
-refine_preloader_configmap()
-{
-    local _do_sed=0
-    [ "${PRELOADER_GRANUALARITY}" != "" ] && _do_sed=1 && sed_opt_1="s|granularity *=.*|granularity = ${PRELOADER_GRANUALARITY}|g"
-    [ "${PRELOADER_PRELOAD_COUNT}" != "" ] && _do_sed=1 && sed_opt_2="s| preload_count *=.*| preload_count = ${PRELOADER_PRELOAD_COUNT}|g"
-    if [ "${_do_sed}" = "1" ]; then
-        wait_until_pods_ready 600 30 $install_namespace 5
-        kubectl -n $install_namespace get cm federatorai-agent-preloader-config -o yaml \
-          | sed "
-${sed_opt_1}
-${sed_opt_2}
-" \
-          | kubectl -n $install_namespace apply -f -
-        if [ "${PIPESTATUS[0]}" != "0" -o "${PIPESTATUS[1]}" != "0" -o "${PIPESTATUS[2]}" != "0" ]; then
-            echo -e "\n$(tput setaf 1)Error! Failed in refining preloader configuration.$(tput sgr 0)"
-            exit 1
-        fi
-        # restart preloader pod
-        get_current_preloader_name
-        [ "${current_preloader_pod_name}" != "" ] && kubectl -n $install_namespace delete pod $current_preloader_pod_name  --wait=true
-    fi
-}
-
 run_ab_test()
 {
     echo -e "\n$(tput setaf 6)Running ab test in preloader...$(tput sgr 0)"
-
-    get_current_preloader_name
-    if [ "$current_preloader_pod_name" = "" ]; then
-        echo -e "\n$(tput setaf 1)ERROR! Can't find installed preloader pod.$(tput sgr 0)"
-        leave_prog
-        exit 8
-    fi
 
     # Modify parameters
     nginx_ip=$(kubectl -n $nginx_ns get svc|grep "${nginx_name}"|awk '{print $3}')
@@ -306,14 +263,13 @@ run_ab_test()
 
     sed -i "s/SVC_IP=.*/SVC_IP=${nginx_ip}/g" ./$preloader_folder/generate_loads.sh
     sed -i "s/SVC_PORT=.*/SVC_PORT=${nginx_port}/g" ./$preloader_folder/generate_loads.sh
-    sed -i "s/traffic_ratio.*/traffic_ratio = ${traffic_ratio}/g" ./$preloader_folder/define.py
 
     for ab_file in "${ab_files_list[@]}"
     do
         kubectl cp -n $install_namespace $preloader_folder/$ab_file ${current_preloader_pod_name}:/opt/alameda/federatorai-agent/
     done
     # New traffic folder
-    kubectl -n $install_namespace exec $current_preloader_pod_name -- mkdir -p /opt/alameda/federatorai-agent/traffic
+    kubectl -n $install_namespace exec $current_preloader_pod_name -- mkdir /opt/alameda/federatorai-agent/traffic
     # trigger ab test
     kubectl -n $install_namespace exec $current_preloader_pod_name -- bash -c "/opt/alameda/federatorai-agent/generate_loads.sh >run_output 2>run_output &"
     if [ "$?" != "0" ]; then
@@ -331,9 +287,6 @@ run_preloader_command()
     fi
     # Move scale_down inside run_preloader_command, just in case we need to patch data adapter (historical_only mode)
     scale_down_pods
-
-    # Refine configmap before running preloader
-    refine_preloader_configmap
 
     # check env is ready
     wait_for_cluster_status_data_ready
@@ -863,6 +816,7 @@ spec:
                 memory: "10Mi"
         ports:
         - containerPort: ${nginx_port}
+      serviceAccount: ${nginx_name}
       serviceAccountName: ${nginx_name}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -934,22 +888,10 @@ get_datadog_agent_info()
     dd_cluster_name="$(kubectl get deploy $dd_cluster_agent_deploy_name -n $dd_namespace -o jsonpath='{range .spec.template.spec.containers[*]}{.env[?(@.name=="DD_CLUSTER_NAME")].value}' 2>/dev/null | awk '{print $1}')"
 }
 
-get_datasource_in_alamedaorganization()
-{
-    # ##Get cluster specific data source setting
-    # data_source_type="$(kubectl get alamedaorganization -o jsonpath="{range .items[*]}{.spec.clusters[?(@.name==\"$cluster_name\")].dataSource.type}")"
-    # if [ "$data_source_type" != "" ]; then
-    #     return
-    # fi
-
-    # Get global data source setting
-    data_source_type="$(kubectl get alamedaorganization -o jsonpath='{range .items[*]}{.spec.dataSource.type}')"
-}
-
 add_dd_tags_to_executor_env()
 {
     start=`date +%s`
-    kubectl patch alamedaservice $alamedaservice_name -n ${install_namespace} --type merge --patch "{\"spec\":{\"alamedaExecutor\":{\"env\":[{\"name\": \"ALAMEDA_EXECUTOR_CLUSTERNAME\",\"value\": \"$cluster_name\"}]}}}"
+    kubectl patch alamedaservice $alamedaservice_name -n ${install_namespace} --type merge --patch "{\"spec\":{\"alamedaExecutor\":{\"env\":[{\"name\": \"ALAMEDA_EXECUTOR_CLUSTERNAME\",\"value\": \"$dd_cluster_name\"}]}}}"
     if [ "$?" != "0" ]; then
         echo -e "\n$(tput setaf 1)Error! Failed to set ALAMEDA_EXECUTOR_CLUSTERNAME as alamedaExecutor env.$(tput sgr 0)"
         leave_prog
@@ -985,7 +927,7 @@ metadata:
     name: ${alamedascaler_name}
     namespace: ${install_namespace}
 spec:
-    clusterName: ${cluster_name}
+    clusterName: ${dd_cluster_name}
     controllers:
     - type: generic
       enableExecution: ${enable_execution}
@@ -1071,7 +1013,7 @@ cleanup_influxdb_preloader_related_contents()
         echo "cleaning up measurements: ${m_list}"
         kubectl exec $influxdb_pod_name -n $install_namespace -- influx -ssl -unsafeSsl -precision rfc3339 -username admin -password adminpass -database alameda_metric -execute "${sql_cmd}" | grep -v "^$"
     fi
-
+    
     echo "Done."
     end=`date +%s`
     duration=$((end-start))
@@ -1283,7 +1225,7 @@ if [ "$#" -eq "0" ]; then
     exit
 fi
 
-while getopts "f:n:t:x:g:cdehikprvobs:a:" o; do
+while getopts "f:n:t:x:cdehikprvo" o; do
     case "${o}" in
         p)
             prepare_environment="y"
@@ -1299,9 +1241,6 @@ while getopts "f:n:t:x:g:cdehikprvobs:a:" o; do
             ;;
         e)
             enable_preloader="y"
-            ;;
-        b)
-            run_ab_from_preloader="y"
             ;;
         r)
             run_preloader_with_normal_mode="y"
@@ -1321,18 +1260,10 @@ while getopts "f:n:t:x:g:cdehikprvobs:a:" o; do
             enable_execution_specified="y"
             s_arg=${OPTARG}
             ;;
-        a)
-            cluster_name_specified="y"
-            a_arg=${OPTARG}
-            ;;
         # x)
         #     autoscaling_specified="y"
         #     x_arg=${OPTARG}
         #     ;;
-        g)
-            traffic_ratio_specified="y"
-            g_arg=${OPTARG}
-            ;;
         n)
             nginx_name_specified="y"
             n_arg=${OPTARG}
@@ -1353,50 +1284,6 @@ while getopts "f:n:t:x:g:cdehikprvobs:a:" o; do
     esac
 done
 
-if [ "$prepare_environment" = "y" ] && [ "$cluster_name_specified" != "y" ]; then
-    echo -e "\n$(tput setaf 1)Error! You need to specify '-a your_cluster_name'.$(tput sgr 0)"
-    show_usage
-    exit 3
-elif [ "$prepare_environment" = "y" ] && [ "$cluster_name_specified" = "y" ]; then
-    cluster_name="$a_arg"
-
-    if [ "$cluster_name" = "" ]; then
-        echo -e "\n$(tput setaf 1)Error! Cluster name can't be empty.$(tput sgr 0)"
-        show_usage
-        exit 3
-    fi
-
-    # check data source
-    get_datasource_in_alamedaorganization
-    if [ "$data_source_type" = "" ]; then
-        echo -e "\n$(tput setaf 1)Error! Failed to find global data source setting in alamedaorganization CR.$(tput sgr 0)"
-        echo -e "$(tput setaf 1)Remember to set up alamedaorganization before running preloader.$(tput sgr 0)"
-        exit 3
-    elif [ "$data_source_type" = "datadog" ]; then
-        # No double check for prometheus or sysdig for now.
-        # Do DD_CLUSTER_NAME check
-        get_datadog_agent_info
-        if [ "$dd_cluster_name" = "" ]; then
-            echo -e "\n$(tput setaf 1)Error! Failed to auto-discover DD_CLUSTER_NAME value in Datadog cluster agent env variable.$(tput sgr 0)"
-            echo -e "\n$(tput setaf 1)Please help to set up cluster name accordingly.$(tput sgr 0)"
-            exit 7
-        else
-            if [ "$cluster_name" != "$dd_cluster_name" ]; then
-                echo -e "\n$(tput setaf 1)Error! Cluster name ($cluster_name) specified through (-a) option doesn not match the DD_CLUSTER_NAME ($dd_cluster_name) value in Datadog cluster agent env variable.$(tput sgr 0)"
-                exit 5
-            fi
-        fi
-    fi
-
-    # check cluster-only alamedascaler exist
-    kubectl get alamedascaler -n federatorai -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.clusterName}{"\n"}'|grep -q "^${cluster_name} ${cluster_name}"
-    if [ "$?" != "0" ];then
-        echo -e "\n$(tput setaf 1)Error! Failed to find cluster-only alamedascaler with cluster name ($cluster_name).$(tput sgr 0)"
-        echo -e "\n$(tput setaf 1)Please use Federator.ai GUI to configure cluster first.$(tput sgr 0)"
-        exit 7
-    fi
-fi
-
 if [ "$future_mode_enabled" = "y" ]; then
     future_mode_length=$f_arg
     case $future_mode_length in
@@ -1405,28 +1292,8 @@ if [ "$future_mode_enabled" = "y" ]; then
     esac
 fi
 
-if [ "$traffic_ratio_specified" = "y" ]; then
-    traffic_ratio=$g_arg
-    case $traffic_ratio in
-        ''|*[!0-9]*) echo -e "\n$(tput setaf 1)ab test traffic ratio needs to be an integer.$(tput sgr 0)" && show_usage ;;
-        *) ;;
-    esac
-else
-    traffic_ratio="4000"
-fi
-
 if [ "$run_preloader_with_normal_mode" = "y" ] && [ "$run_preloader_with_historical_only" = "y" ]; then
-    echo -e "\n$(tput setaf 1)Error! You can specify either the '-r' or the '-o' parameter, but not both.$(tput sgr 0)" && show_usage
-    exit 3
-fi
-
-if [ "$run_preloader_with_normal_mode" = "y" ] && [ "$run_ab_from_preloader" = "y" ]; then
-    echo -e "\n$(tput setaf 1)Error! You can specify either the '-r' or the '-b' parameter, but not both.$(tput sgr 0)" && show_usage
-    exit 3
-fi
-
-if [ "$run_preloader_with_historical_only" = "y" ] && [ "$run_ab_from_preloader" = "y" ]; then
-    echo -e "\n$(tput setaf 1)Error! You can specify either the '-o' or the '-b' parameter, but not both.$(tput sgr 0)" && show_usage
+    echo -e "\n$(tput setaf 1)Error! You can specify either the '-r' or the '-o' parameter, but not both." && show_usage
     exit 3
 fi
 
@@ -1512,7 +1379,7 @@ mkdir -p $file_folder
 current_location=`pwd`
 # copy preloader ab files if run historical only mode enabled
 preloader_folder="preloader_ab_runner"
-if [ "$run_preloader_with_historical_only" = "y" ] || [ "$run_ab_from_preloader" = "y" ]; then
+if [ "$run_preloader_with_historical_only" = "y" ]; then
     # Check folder exists
     [ ! -d "$preloader_folder" ] && echo -e "$(tput setaf 1)Error! Can't locate $preloader_folder folder.$(tput sgr 0)" && exit 3
 
@@ -1532,6 +1399,18 @@ fi
 
 cd $file_folder
 echo "Receiving command '$0 $@'" >> $debug_log
+
+## With standalone install/remove nginx action, we do not need get_datadog_agent_info
+if [ "$install_nginx" != "y" -a "$remove_nginx" != "y" ]; then
+    get_datadog_agent_info
+    if [ "$dd_cluster_name" = "" ]; then
+        echo -e "\n$(tput setaf 1)Error! Failed to auto-discover DD_CLUSTER_NAME value in Datadog cluster agent env variable.$(tput sgr 0)"
+        echo -e "\n$(tput setaf 1)Please help to set up cluster name accordingly.$(tput sgr 0)"
+        exit
+    else
+        echo -e "$(tput setaf 3)Use \"$dd_cluster_name\" as the cluster name.$(tput sgr 0)"
+    fi
+fi
 
 if [ "$prepare_environment" = "y" ]; then
     delete_all_alamedascaler
@@ -1554,10 +1433,6 @@ if [ "$enable_preloader" = "y" ]; then
         switch_alameda_executor_in_alamedaservice "on"
     fi
     enable_preloader_in_alamedaservice
-fi
-
-if [ "$run_ab_from_preloader" = "y" ]; then
-    run_ab_test
 fi
 
 if [ "$run_preloader_with_normal_mode" = "y" ] || [ "$run_preloader_with_historical_only" = "y" ]; then

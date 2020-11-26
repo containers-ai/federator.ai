@@ -744,7 +744,7 @@ get_cluster_info()
 
 get_alamedaservice_full_version()
 {
-    alameda_version="`kubectl get alamedaservices --all-namespaces -o jsonpath='{.items[].spec.version}'`"
+    alameda_version=`kubectl get alamedaservice --all-namespaces|grep -v 'EXECUTION'|awk '{print $4}'`
     if [ "$alameda_version" = "" ]; then
         echo -e "\n$(tput setaf 1)Error! Failed to get Federator.ai version!$(tput sgr 0)"
         exit 2

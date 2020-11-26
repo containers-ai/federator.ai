@@ -12,10 +12,14 @@ rules:
   - "*"
 - apiGroups:
   - federatorai.containers.ai
+  resources:
+  - "*"
+  verbs:
+  - "*"
+- apiGroups:
   - autoscaling.containers.ai
   - tenant.containers.ai
   - analysis.containers.ai
-  - notifying.containers.ai
   resources:
   - "*"
   verbs:
@@ -244,6 +248,12 @@ rules:
   - update
   - delete
   - use
+- apiGroups:
+  - notifying.containers.ai
+  resources:
+  - "*"
+  verbs:
+  - "*"
 - apiGroups:
   - monitoring.coreos.com
   resources:

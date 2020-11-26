@@ -413,7 +413,7 @@ get_datadog_agent_info()
     dd_api_key="`kubectl get secret -n $dd_namespace $dd_api_secret_name -o jsonpath='{.data.api-key}'`"
     dd_app_key="`kubectl get secret -n $dd_namespace -o jsonpath='{range .items[*]}{.data.app-key}'`"
     dd_cluster_agent_deploy_name="$(kubectl get deploy -n $dd_namespace|grep -v NAME|awk '{print $1}'|grep "cluster-agent$")"
-    dd_cluster_name="$(kubectl get deploy $dd_cluster_agent_deploy_name -n $dd_namespace -o jsonpath='{range .spec.template.spec.containers[*]}{.env[?(@.name=="DD_CLUSTER_NAME")].value}' 2>/dev/null | awk '{print $1}')"
+    dd_cluster_name="$(kubectl get deploy $dd_cluster_agent_deploy_name -n $dd_namespace 2>/dev/null -o jsonpath='{range .spec.template.spec.containers[*]}{.env[?(@.name=="DD_CLUSTER_NAME")].value}')"
 }
 
 display_cluster_scaler_file_location()
@@ -497,7 +497,7 @@ __EOF__
     fi
 
     echo -e "$(tput setaf 3)Use \"$dd_cluster_name\" as the cluster name and DD_CLUSTER_NAME$(tput sgr 0)"
-        sed -i "s|\bclusterName:.*|clusterName: ${dd_cluster_name}|g" $alamedascaler_cluster_filename
+    sed -i "s|\bclusterName:.*|clusterName: ${dd_cluster_name}|g" $alamedascaler_cluster_filename
 
     echo "Applying file $alamedascaler_cluster_filename ..."
     kubectl apply -f $alamedascaler_cluster_filename
@@ -506,42 +506,6 @@ __EOF__
     fi
     echo "Done"
     display_cluster_scaler_file_location
-}
-
-download_cr_files()
-{
-    cr_files=( "alamedadetection.yaml" "alamedanotificationchannel.yaml" "alamedanotificationtopic.yaml" )
-
-    for file_name in "${cr_files[@]}"
-    do
-        if ! curl -sL --fail https://raw.githubusercontent.com/containers-ai/prophetstor/${tag_number}/deploy/example/${file_name} -O; then
-            echo -e "\n$(tput setaf 1)Abort, download $file_name sample file failed!!!$(tput sgr 0)"
-            exit 3
-        fi
-    done
-}
-
-download_alamedascaler_files()
-{
-    # Three kinds of alamedascaler
-    # In offline mode, alamedascaler files will be downloaded by federatorai-launcher.sh
-    alamedascaler_filename="alamedascaler.yaml"
-    src_pool=( "kafka" "nginx" "redis" )
-
-    for pool in "${src_pool[@]}"
-    do
-        if ! curl -sL --fail https://raw.githubusercontent.com/containers-ai/prophetstor/${tag_number}/deploy/example/${pool}/${alamedascaler_filename} -O; then
-            echo -e "\n$(tput setaf 1)Abort, download $alamedascaler_filename sample file from $pool folder failed!!!$(tput sgr 0)"
-            exit 3
-        fi
-        if [ "$pool" = "kafka" ]; then
-            mv $alamedascaler_filename alamedascaler_kafka.yaml
-        elif [ "$pool" = "nginx" ]; then
-            mv $alamedascaler_filename alamedascaler_nginx.yaml
-        else
-            mv $alamedascaler_filename alamedascaler_generic.yaml
-        fi
-    done
 }
 
 # get_recommended_prometheus_url()
@@ -655,16 +619,6 @@ if [ "$offline_mode_enabled" = "y" ] && [ "$RELATED_IMAGE_URL_PREFIX" = "" ]; th
     exit
 fi
 
-if [ "$ALAMEDASERVICE_FILE_PATH" != "" ]; then
-    if [ ! -r "$ALAMEDASERVICE_FILE_PATH" ]; then
-        echo -e "\n$(tput setaf 1)Error! alamedaservice file ($ALAMEDASERVICE_FILE_PATH) is not readable.$(tput sgr 0)"
-        exit
-    fi
-    # read value for RELATED_IMAGE_URL_PREFIX
-    RELATED_IMAGE_URL_PREFIX="`grep '^  imageLocation: ' ${ALAMEDASERVICE_FILE_PATH} | awk '{print $2}'`"
-    [ "${RELATED_IMAGE_URL_PREFIX}" = "" ] && export ${RELATED_IMAGE_URL_PREFIX}
-fi
-
 kubectl version|grep -q "^Server"
 if [ "$?" != "0" ];then
     echo -e "\nPlease login to Kubernetes first."
@@ -687,38 +641,6 @@ previous_alameda_namespace="`kubectl get pods --all-namespaces |grep "alameda-ai
 previous_tag="`kubectl get pods -n $previous_alameda_namespace -o custom-columns=NAME:.metadata.name,IMAGE:.spec.containers[*].image 2>/dev/null| grep datahub | head -1 |awk -F'/' '{print $NF}'| cut -d ':' -f2`"
 previous_alamedaservice="`kubectl get alamedaservice -n $previous_alameda_namespace -o custom-columns=NAME:.metadata.name 2>/dev/null|grep -v NAME|head -1`"
 
-# Read alamedaservice file option only work in fresh installation.
-if [ "$previous_alameda_namespace" != "" ] && [ "$ALAMEDASERVICE_FILE_PATH" != "" ]; then
-    echo -e "\n$(tput setaf 1)Error! Read alamedaservice file option doesn't work in upgrade mode.$(tput sgr 0)"
-    exit
-fi
-
-# Read alamedaservice file option doesn't work with silent mode.
-if [ "$silent_mode_disabled" != "y" ] && [ "$ALAMEDASERVICE_FILE_PATH" != "" ]; then
-    echo -e "\n$(tput setaf 1)Error! Read alamedaservice file option doesn't work with silent mode.$(tput sgr 0)"
-    exit
-fi
-
-# Read alamedaservice file option doesn't work with offline mode.
-if [ "$offline_mode_enabled" = "y" ] && [ "$ALAMEDASERVICE_FILE_PATH" != "" ]; then
-    echo -e "\n$(tput setaf 1)Error! Read alamedaservice file option doesn't work with offline mode.$(tput sgr 0)"
-    exit
-fi
-
-if [ "$ALAMEDASERVICE_FILE_PATH" != "" ]; then
-    while [ "$read_alamedaservice" != "y" ] && [ "$read_alamedaservice" != "n" ]
-    do
-        default="y"
-        read -r -p "$(tput setaf 2)Do you want to install Federator.ai based on AlamedaService file ($ALAMEDASERVICE_FILE_PATH)? [default: $default]: $(tput sgr 0)" read_alamedaservice </dev/tty
-        read_alamedaservice=${read_alamedaservice:-$default}
-        read_alamedaservice=$(echo "$read_alamedaservice" | tr '[:upper:]' '[:lower:]')
-    done
-    if [ "$read_alamedaservice" != "y" ]; then
-        echo -e "\n$(tput setaf 1)Installation aborted.$(tput sgr 0)"
-        exit
-    fi
-fi
-
 if [ "$previous_alameda_namespace" != "" ];then
     need_upgrade="y"
     ## find value of RELATED_IMAGE_URL_PREFIX for upgrading alamedaservice CR
@@ -735,71 +657,58 @@ if [ "$previous_alameda_namespace" != "" ];then
     fi
 fi
 
-if [ "$ALAMEDASERVICE_FILE_PATH" = "" ]; then
-    if [ "$silent_mode_disabled" = "y" ];then
+if [ "$silent_mode_disabled" = "y" ];then
 
-        while [[ "$info_correct" != "y" ]] && [[ "$info_correct" != "Y" ]]
-        do
-            # init variables
-            install_namespace=""
-            # Check if tag number is specified
-            if [ "$specified_tag_number" = "" ]; then
-                tag_number=""
-                read -r -p "$(tput setaf 2)Please input Federator.ai Operator tag:$(tput sgr 0) " tag_number </dev/tty
-            else
-                tag_number=$specified_tag_number
-            fi
-
-            if [ "$need_upgrade" = "y" ];then
-                echo -e "\n$(tput setaf 11)Previous build with tag$(tput setaf 1) $previous_tag $(tput setaf 11)detected in namespace$(tput setaf 1) $previous_alameda_namespace$(tput sgr 0)"
-                install_namespace="$previous_alameda_namespace"
-            else
-                default="federatorai"
-                read -r -p "$(tput setaf 2)Enter the namespace you want to install Federator.ai [default: federatorai]: $(tput sgr 0)" install_namespace </dev/tty
-                install_namespace=${install_namespace:-$default}
-            fi
-
-            echo -e "\n----------------------------------------"
-            if [ "$need_upgrade" = "y" ];then
-                echo "$(tput setaf 11)Upgrade:$(tput sgr 0)"
-            fi
-            echo "tag_number = $tag_number"
-            echo "install_namespace = $install_namespace"
-            echo "----------------------------------------"
-
-            default="y"
-            read -r -p "$(tput setaf 2)Is the above information correct? [default: y]: $(tput sgr 0)" info_correct </dev/tty
-            info_correct=${info_correct:-$default}
-        done
-    else
-        tag_number=$specified_tag_number
-        echo -e "\n----------------------------------------"
-        echo "tag_number=$specified_tag_number"
-        echo "install_namespace=$install_namespace"
-        #echo "enable_execution=$enable_execution"
-        #echo "prometheus_address=$prometheus_address"
-        echo "storage_type=$storage_type"
-        echo "log_size=$log_size"
-        echo "influxdb_size=$influxdb_size"
-        echo "data_size=$data_size"
-        echo "storage_class=$storage_class"
-        if [ "$openshift_minor_version" = "" ]; then
-            #k8s
-            echo "expose_service=$expose_service"
+    while [[ "$info_correct" != "y" ]] && [[ "$info_correct" != "Y" ]]
+    do
+        # init variables
+        install_namespace=""
+        # Check if tag number is specified
+        if [ "$specified_tag_number" = "" ]; then
+            tag_number=""
+            read -r -p "$(tput setaf 2)Please input Federator.ai Operator tag:$(tput sgr 0) " tag_number </dev/tty
+        else
+            tag_number=$specified_tag_number
         fi
-        echo -e "----------------------------------------\n"
-    fi
+
+        if [ "$need_upgrade" = "y" ];then
+            echo -e "\n$(tput setaf 11)Previous build with tag$(tput setaf 1) $previous_tag $(tput setaf 11)detected in namespace$(tput setaf 1) $previous_alameda_namespace$(tput sgr 0)"
+            install_namespace="$previous_alameda_namespace"
+        else
+            default="federatorai"
+            read -r -p "$(tput setaf 2)Enter the namespace you want to install Federator.ai [default: federatorai]: $(tput sgr 0)" install_namespace </dev/tty
+            install_namespace=${install_namespace:-$default}
+        fi
+
+        echo -e "\n----------------------------------------"
+        if [ "$need_upgrade" = "y" ];then
+            echo "$(tput setaf 11)Upgrade:$(tput sgr 0)"
+        fi
+        echo "tag_number = $tag_number"
+        echo "install_namespace = $install_namespace"
+        echo "----------------------------------------"
+
+        default="y"
+        read -r -p "$(tput setaf 2)Is the above information correct? [default: y]: $(tput sgr 0)" info_correct </dev/tty
+        info_correct=${info_correct:-$default}
+    done
 else
-    install_namespace=`grep "^[[:space:]]*namespace:[[:space:]]" $ALAMEDASERVICE_FILE_PATH |awk -F ':' '{print $2}'|xargs`
-    if [ "$install_namespace" = "" ]; then
-        echo -e "\n$(tput setaf 1)Error! Can't parse the namespace info from alamedaservice file ($ALAMEDASERVICE_FILE_PATH).$(tput sgr 0)"
-        exit
+    tag_number=$specified_tag_number
+    echo -e "\n----------------------------------------"
+    echo "tag_number=$specified_tag_number"
+    echo "install_namespace=$install_namespace"
+    #echo "enable_execution=$enable_execution"
+    #echo "prometheus_address=$prometheus_address"
+    echo "storage_type=$storage_type"
+    echo "log_size=$log_size"
+    echo "influxdb_size=$influxdb_size"
+    echo "data_size=$data_size"
+    echo "storage_class=$storage_class"
+    if [ "$openshift_minor_version" = "" ]; then
+        #k8s
+        echo "expose_service=$expose_service"
     fi
-    tag_number=`grep "^[[:space:]]*version:[[:space:]]" $ALAMEDASERVICE_FILE_PATH|grep -v 'version: ""'|awk -F'[^ \t]' '{print length($1), $0}'|sort -k1 -n|head -1|awk '{print $3}'`
-    if [ "$tag_number" = "" ]; then
-        echo -e "\n$(tput setaf 1)Error! Can't parse the version info from alamedaservice file ($ALAMEDASERVICE_FILE_PATH).$(tput sgr 0)"
-        exit
-    fi
+    echo -e "----------------------------------------\n"
 fi
 
 file_folder="/tmp/install-op"
@@ -812,7 +721,7 @@ script_located_path=$(dirname $(readlink -f "$0"))
 cd $file_folder
 
 if [ "$offline_mode_enabled" != "y" ]; then
-    operator_files=`curl --silent https://api.github.com/repos/containers-ai/prophetstor/contents/deploy/upstream?ref=${tag_number} 2>&1|grep "\"name\":"|cut -d ':' -f2|cut -d '"' -f2`
+    operator_files=`curl --silent https://api.github.com/repos/containers-ai/federatorai-operator/contents/deploy/upstream?ref=${tag_number} 2>&1|grep "\"name\":"|cut -d ':' -f2|cut -d '"' -f2`
     if [ "$operator_files" = "" ]; then
         echo -e "\n$(tput setaf 1)Abort, download operator file list failed!!!$(tput sgr 0)"
         echo "Please check tag name and network"
@@ -822,7 +731,7 @@ if [ "$offline_mode_enabled" != "y" ]; then
     for file in `echo $operator_files`
     do
         echo "Downloading file $file ..."
-        if ! curl -sL --fail https://raw.githubusercontent.com/containers-ai/prophetstor/${tag_number}/deploy/upstream/${file} -O; then
+        if ! curl -sL --fail https://raw.githubusercontent.com/containers-ai/federatorai-operator/${tag_number}/deploy/upstream/${file} -O; then
             echo -e "\n$(tput setaf 1)Abort, download file failed!!!$(tput sgr 0)"
             echo "Please check tag name and network"
             exit 1
@@ -867,6 +776,16 @@ fi
 
 echo -e "\n$(tput setaf 2)Applying Federator.ai operator yaml files...$(tput sgr 0)"
 
+# kubectl get APIService v1beta1.admission.certmanager.k8s.io >/dev/null 2>&1
+# if [ "$?" = "0" ]; then
+#     # system has certmanager
+#     # check if it is deployed by ProphetStor
+#     annotation=`kubectl get APIService v1beta1.admission.certmanager.k8s.io -o 'jsonpath={.metadata.annotations.app\.kubernetes\.io\/managed-by}' 2>/dev/null`
+#     if [ "$annotation" != "federator.ai" ]; then
+#         install_certmanager="n"
+#     fi 
+# fi
+
 if [ "$need_upgrade" = "y" ];then
     # for upgrade - delete old federatorai-operator deployment before apply new yaml(s)
 
@@ -882,6 +801,16 @@ if [ "$need_upgrade" = "y" ];then
 fi
 
 for yaml_fn in `ls [0-9]*.yaml | sort -n`; do
+
+    # if [ "$install_certmanager" = "n" ]; then
+    #     if [ "$yaml_fn" = "`ls 03*.yaml`" ] || [ "$yaml_fn" = "`ls 04*.yaml`" ]; then
+    #        # Only apply 03 and 04 yaml when
+    #        # 1. certmanager is deployed by ProphetStor
+    #        # 2. certmanager is not installed
+    #        echo "Skipping ${yaml_fn}..."
+    #        continue
+    #     fi
+    # fi
     echo "Applying ${yaml_fn}..."
     kubectl apply -f ${yaml_fn}
     if [ "$?" != "0" ]; then
@@ -891,146 +820,173 @@ for yaml_fn in `ls [0-9]*.yaml | sort -n`; do
 done
 
 if [ "$need_upgrade" != "y" ];then
-    # Skip pod checking due to federatorai-operator with advanced version may cause some pods keep crashing (Jira FA-597/Jira FA-698)
+    # Skip pod checking due to federatorai-operator with advanced version may cause some pods keep crashing (Jira FA-597)
     # So we delay pod checking until alamedaservice is patched.
     wait_until_pods_ready $max_wait_pods_ready_time 30 $install_namespace 1
     echo -e "\n$(tput setaf 6)Install Federator.ai operator $tag_number successfully$(tput sgr 0)"
 fi
 
-if [ "$ALAMEDASERVICE_FILE_PATH" = "" ]; then
-    alamedaservice_example="alamedaservice_sample.yaml"
-    if [ "$offline_mode_enabled" != "y" ]; then
-        echo -e "\nDownloading Federator.ai CR sample files ..."
-        if ! curl -sL --fail https://raw.githubusercontent.com/containers-ai/prophetstor/${tag_number}/deploy/example/${alamedaservice_example} -O; then
-            echo -e "\n$(tput setaf 1)Abort, download alamedaservice sample file failed!!!$(tput sgr 0)"
-            exit 2
+alamedaservice_example="alamedaservice_sample.yaml"
+if [ "$offline_mode_enabled" != "y" ]; then
+    cr_files=( "alamedadetection.yaml" "alamedanotificationchannel.yaml" "alamedanotificationtopic.yaml" )
+
+    echo -e "\nDownloading Federator.ai CR sample files ..."
+    if ! curl -sL --fail https://raw.githubusercontent.com/containers-ai/federatorai-operator/${tag_number}/example/${alamedaservice_example} -O; then
+        echo -e "\n$(tput setaf 1)Abort, download alamedaservice sample file failed!!!$(tput sgr 0)"
+        exit 2
+    fi
+
+    for file_name in "${cr_files[@]}"
+    do
+        if ! curl -sL --fail https://raw.githubusercontent.com/containers-ai/alameda/${tag_number}/example/samples/nginx/${file_name} -O; then
+            echo -e "\n$(tput setaf 1)Abort, download $file_name sample file failed!!!$(tput sgr 0)"
+            exit 3
         fi
-        download_cr_files
-        echo "Done"
-        echo -e "\nDownloading Federator.ai alamedascaler sample files ..."
-        download_alamedascaler_files
-        echo "Done"
-    else
-        # Offline Mode
-        # Copy CR yamls
-        echo "Copying Federator.ai CR yamls ..."
-        if [[ "`ls ${script_located_path}/../yamls/alameda*.yaml 2>/dev/null|wc -l`" -lt "4" ]]; then
-            echo -e "\n$(tput setaf 1)Error! Failed to locate Federator.ai CR yaml files$(tput sgr 0)"
-            echo "Please make sure you extract the offline install package and execute install.sh under scripts folder  "
-            exit 1
+    done
+    echo "Done"
+
+    # Three kinds of alamedascaler
+    # In offline mode, alamedascaler files will be downloaded by federatorai-launcher.sh
+    alamedascaler_filename="alamedascaler.yaml"
+    src_pool=( "kafka" "nginx" "redis" )
+
+    echo -e "\nDownloading Federator.ai alamedascaler sample files ..."
+    for pool in "${src_pool[@]}"
+    do
+        if ! curl -sL --fail https://raw.githubusercontent.com/containers-ai/alameda/${tag_number}/example/samples/${pool}/${alamedascaler_filename} -O; then
+            echo -e "\n$(tput setaf 1)Abort, download $alamedascaler_filename sample file from $pool folder failed!!!$(tput sgr 0)"
+            exit 3
         fi
-        cp ${script_located_path}/../yamls/alameda*.yaml .
-        echo "Done"
+        if [ "$pool" = "kafka" ]; then
+            mv $alamedascaler_filename alamedascaler_kafka.yaml
+        elif [ "$pool" = "nginx" ]; then
+            mv $alamedascaler_filename alamedascaler_nginx.yaml
+        else
+            mv $alamedascaler_filename alamedascaler_generic.yaml
+        fi
+    done
+    echo "Done"
+else
+    # Offline Mode
+    # Copy CR yamls
+    echo "Copying Federator.ai CR yamls ..."
+    if [[ "`ls ${script_located_path}/../yamls/alameda*.yaml 2>/dev/null|wc -l`" -lt "4" ]]; then
+        echo -e "\n$(tput setaf 1)Error! Failed to locate Federator.ai CR yaml files$(tput sgr 0)"
+        echo "Please make sure you extract the offline install package and execute install.sh under scripts folder  "
+        exit 1
     fi
+    cp ${script_located_path}/../yamls/alameda*.yaml .
+    echo "Done"
+fi
 
-    # Specified alternative container image location
-    if [ "${RELATED_IMAGE_URL_PREFIX}" != "" ]; then
-        sed -i -e "/version: latest/i\  imageLocation: ${RELATED_IMAGE_URL_PREFIX}" ${alamedaservice_example}
-    fi
-    # Specified version tag
-    sed -i "s/version: latest/version: ${tag_number}/g" ${alamedaservice_example}
+# Specified alternative container image location
+if [ "${RELATED_IMAGE_URL_PREFIX}" != "" ]; then
+    sed -i -e "/version: latest/i\  imageLocation: ${RELATED_IMAGE_URL_PREFIX}" ${alamedaservice_example}
+fi
+# Specified version tag
+sed -i "s/version: latest/version: ${tag_number}/g" ${alamedaservice_example}
 
-    echo "========================================"
+echo "========================================"
 
-    if [ "$silent_mode_disabled" = "y" ] && [ "$need_upgrade" != "y" ];then
+if [ "$silent_mode_disabled" = "y" ] && [ "$need_upgrade" != "y" ];then
 
-        # Check prometheus support in first non silent installation mode
-        # check_prometheus_metrics
+    # Check prometheus support in first non silent installation mode
+    # check_prometheus_metrics
 
-        while [[ "$information_correct" != "y" ]] && [[ "$information_correct" != "Y" ]]
-        do
-            # init variables
-            #prometheus_address=""
-            storage_type=""
-            log_size=""
-            data_size=""
-            influxdb_size=""
-            storage_class=""
-            expose_service=""
-
-            # if [ "$set_prometheus_rule_to" = "y" ]; then
-            #     get_recommended_prometheus_url
-            #     default="$prometheus_url"
-            #     echo "$(tput setaf 127)Enter the Prometheus service address"
-            #     read -r -p "[default: ${default}]: $(tput sgr 0)" prometheus_address </dev/tty
-            #     prometheus_address=${prometheus_address:-$default}
-            # fi
-
-            while [[ "$storage_type" != "ephemeral" ]] && [[ "$storage_type" != "persistent" ]]
-            do
-                default="ephemeral"
-                echo "$(tput setaf 127)Which storage type you would like to use? ephemeral or persistent?"
-                read -r -p "[default: ephemeral]: $(tput sgr 0)" storage_type </dev/tty
-                storage_type=${storage_type:-$default}
-            done
-
-            if [[ "$storage_type" == "persistent" ]]; then
-                default="10"
-                read -r -p "$(tput setaf 127)Specify log storage size [e.g., 10 for 10GB, default: 10]: $(tput sgr 0)" log_size </dev/tty
-                log_size=${log_size:-$default}
-                default="10"
-                read -r -p "$(tput setaf 127)Specify data storage size [e.g., 10 for 10GB, default: 10]: $(tput sgr 0)" data_size </dev/tty
-                data_size=${data_size:-$default}
-                default="100"
-                read -r -p "$(tput setaf 127)Specify InfluxDB storage size [e.g., 100 for 100GB, default: 100]: $(tput sgr 0)" influxdb_size </dev/tty
-                influxdb_size=${influxdb_size:-$default}
-
-                while [[ "$storage_class" == "" ]]
-                do
-                    read -r -p "$(tput setaf 127)Specify storage class name: $(tput sgr 0)" storage_class </dev/tty
-                done
-            fi
-
-            if [ "$openshift_minor_version" = "" ]; then
-                #k8s
-                default="y"
-                read -r -p "$(tput setaf 127)Do you want to expose dashboard and REST API services for external access? [default: y]:$(tput sgr 0)" expose_service </dev/tty
-                expose_service=${expose_service:-$default}
-            fi
-
-            echo -e "\n----------------------------------------"
-            echo "install_namespace = $install_namespace"
-
-            # if [ "$set_prometheus_rule_to" = "y" ]; then
-            #     echo "prometheus_address = $prometheus_address"
-            # fi
-            echo "storage_type = $storage_type"
-            if [[ "$storage_type" == "persistent" ]]; then
-                echo "log storage size = $log_size GB"
-                echo "data storage size = $data_size GB"
-                echo "InfluxDB storage size = $influxdb_size GB"
-                echo "storage class name = $storage_class"
-            fi
-            if [ "$openshift_minor_version" = "" ]; then
-                #k8s
-                echo "expose service = $expose_service"
-            fi
-            echo "----------------------------------------"
-
-            default="y"
-            read -r -p "$(tput setaf 2)Is the above information correct [default: y]:$(tput sgr 0)" information_correct </dev/tty
-            information_correct=${information_correct:-$default}
-        done
-    fi
-
-    #grafana_node_port="31010"
-    rest_api_node_port="31011"
-    dashboard_frontend_node_port="31012"
-
-    if [ "$need_upgrade" != "y" ]; then
-        # First time installation case
-        sed -i "s|\bnamespace:.*|namespace: ${install_namespace}|g" ${alamedaservice_example}
+    while [[ "$information_correct" != "y" ]] && [[ "$information_correct" != "Y" ]]
+    do
+        # init variables
+        #prometheus_address=""
+        storage_type=""
+        log_size=""
+        data_size=""
+        influxdb_size=""
+        storage_class=""
+        expose_service=""
 
         # if [ "$set_prometheus_rule_to" = "y" ]; then
-        #     sed -i "s|\bprometheusService:.*|prometheusService: ${prometheus_address}|g" ${alamedaservice_example}
-        #     sed -i "s|\bautoPatchPrometheusRules:.*|autoPatchPrometheusRules: true|g" ${alamedaservice_example}
-        # else
-        #     sed -i "s|\bautoPatchPrometheusRules:.*|autoPatchPrometheusRules: false|g" ${alamedaservice_example}
+        #     get_recommended_prometheus_url
+        #     default="$prometheus_url"
+        #     echo "$(tput setaf 127)Enter the Prometheus service address"
+        #     read -r -p "[default: ${default}]: $(tput sgr 0)" prometheus_address </dev/tty
+        #     prometheus_address=${prometheus_address:-$default}
         # fi
 
+        while [[ "$storage_type" != "ephemeral" ]] && [[ "$storage_type" != "persistent" ]]
+        do
+            default="ephemeral"
+            echo "$(tput setaf 127)Which storage type you would like to use? ephemeral or persistent?"
+            read -r -p "[default: ephemeral]: $(tput sgr 0)" storage_type </dev/tty
+            storage_type=${storage_type:-$default}
+        done
+
         if [[ "$storage_type" == "persistent" ]]; then
-            sed -i '/- usage:/,+10d' ${alamedaservice_example}
-            cat >> ${alamedaservice_example} << __EOF__
+            default="10"
+            read -r -p "$(tput setaf 127)Specify log storage size [e.g., 10 for 10GB, default: 10]: $(tput sgr 0)" log_size </dev/tty
+            log_size=${log_size:-$default}
+            default="10"
+            read -r -p "$(tput setaf 127)Specify data storage size [e.g., 10 for 10GB, default: 10]: $(tput sgr 0)" data_size </dev/tty
+            data_size=${data_size:-$default}
+            default="100"
+            read -r -p "$(tput setaf 127)Specify InfluxDB storage size [e.g., 100 for 100GB, default: 100]: $(tput sgr 0)" influxdb_size </dev/tty
+            influxdb_size=${influxdb_size:-$default}
+
+            while [[ "$storage_class" == "" ]]
+            do
+                read -r -p "$(tput setaf 127)Specify storage class name: $(tput sgr 0)" storage_class </dev/tty
+            done
+        fi
+
+        if [ "$openshift_minor_version" = "" ]; then
+            #k8s
+            default="y"
+            read -r -p "$(tput setaf 127)Do you want to expose dashboard and REST API services for external access? [default: y]:$(tput sgr 0)" expose_service </dev/tty
+            expose_service=${expose_service:-$default}
+        fi
+
+        echo -e "\n----------------------------------------"
+        echo "install_namespace = $install_namespace"
+
+        # if [ "$set_prometheus_rule_to" = "y" ]; then
+        #     echo "prometheus_address = $prometheus_address"
+        # fi
+        echo "storage_type = $storage_type"
+        if [[ "$storage_type" == "persistent" ]]; then
+            echo "log storage size = $log_size GB"
+            echo "data storage size = $data_size GB"
+            echo "InfluxDB storage size = $influxdb_size GB"
+            echo "storage class name = $storage_class"
+        fi
+        if [ "$openshift_minor_version" = "" ]; then
+            #k8s
+            echo "expose service = $expose_service"
+        fi
+        echo "----------------------------------------"
+
+        default="y"
+        read -r -p "$(tput setaf 2)Is the above information correct [default: y]:$(tput sgr 0)" information_correct </dev/tty
+        information_correct=${information_correct:-$default}
+    done
+fi
+
+#grafana_node_port="31010"
+rest_api_node_port="31011"
+dashboard_frontend_node_port="31012"
+
+if [ "$need_upgrade" != "y" ]; then 
+    # First time installation case
+    sed -i "s|\bnamespace:.*|namespace: ${install_namespace}|g" ${alamedaservice_example}
+
+    # if [ "$set_prometheus_rule_to" = "y" ]; then
+    #     sed -i "s|\bprometheusService:.*|prometheusService: ${prometheus_address}|g" ${alamedaservice_example}
+    #     sed -i "s|\bautoPatchPrometheusRules:.*|autoPatchPrometheusRules: true|g" ${alamedaservice_example}
+    # else
+    #     sed -i "s|\bautoPatchPrometheusRules:.*|autoPatchPrometheusRules: false|g" ${alamedaservice_example}
+    # fi
+
+    if [[ "$storage_type" == "persistent" ]]; then
+        sed -i '/- usage:/,+10d' ${alamedaservice_example}
+        cat >> ${alamedaservice_example} << __EOF__
     - usage: log
       type: pvc
       size: ${log_size}Gi
@@ -1041,16 +997,18 @@ if [ "$ALAMEDASERVICE_FILE_PATH" = "" ]; then
       class: ${storage_class}
 
 __EOF__
-        fi
+    fi
 
-        # enableGPU: false
-        cat >> ${alamedaservice_example} << __EOF__
+    # enableGPU: false
+    # enableVPA: false
+    cat >> ${alamedaservice_example} << __EOF__
   enableGPU: false
+  enableVPA: false
 __EOF__
 
-        if [ "$openshift_minor_version" = "" ]; then #k8s
-            if [ "$expose_service" = "y" ] || [ "$expose_service" = "Y" ]; then
-                cat >> ${alamedaservice_example} << __EOF__
+    if [ "$openshift_minor_version" = "" ]; then #k8s
+        if [ "$expose_service" = "y" ] || [ "$expose_service" = "Y" ]; then
+            cat >> ${alamedaservice_example} << __EOF__
   serviceExposures:
     - name: federatorai-dashboard-frontend
       nodePort:
@@ -1065,12 +1023,12 @@ __EOF__
             port: 5056
       type: NodePort
 __EOF__
-            fi
         fi
+    fi
 
-        # Enable resource requirement configuration
-        if [ "${ENABLE_RESOURCE_REQUIREMENT}" = "y" ]; then
-            cat >> ${alamedaservice_example} << __EOF__
+    # Enable resource requirement configuration
+    if [ "${ENABLE_RESOURCE_REQUIREMENT}" = "y" ]; then
+        cat >> ${alamedaservice_example} << __EOF__
   resources:
     limits:
       cpu: 4000m
@@ -1112,69 +1070,52 @@ __EOF__
         cpu: 50m
         memory: 100Mi
 __EOF__
-        fi
-        if [ "${ENABLE_RESOURCE_REQUIREMENT}" = "y" ] && [ "$storage_type" = "persistent" ]; then
-            cat >> ${alamedaservice_example} << __EOF__
-  alamedaInfluxdb:
-    resources:
-      requests:
-        cpu: 500m
-        memory: 500Mi
-    storages:
-    - usage: data
-      type: pvc
-      size: ${influxdb_size}Gi
-      class: ${storage_class}
-__EOF__
-        elif [ "${ENABLE_RESOURCE_REQUIREMENT}" = "y" ] && [ "$storage_type" = "ephemeral" ]; then
-            cat >> ${alamedaservice_example} << __EOF__
-  alamedaInfluxdb:
-    resources:
-      requests:
-        cpu: 500m
-        memory: 500Mi
-__EOF__
-        elif [ "${ENABLE_RESOURCE_REQUIREMENT}" != "y" ] && [ "$storage_type" = "persistent" ]; then
-            cat >> ${alamedaservice_example} << __EOF__
-  alamedaInfluxdb:
-    storages:
-    - usage: data
-      type: pvc
-      size: ${influxdb_size}Gi
-      class: ${storage_class}
-__EOF__
-        fi
-
-        kubectl apply -f $alamedaservice_example >/dev/null
-        if [ "$?" != "0" ]; then
-            echo -e "\n$(tput setaf 1)Error! Failed to update alamedaservice yaml (${file_folder}/${$alamedaservice_example}).$(tput sgr 0)"
-            exit 1
-        fi
-    else
-        # Upgrade case, patch version to alamedaservice only
-        kubectl patch alamedaservice $previous_alamedaservice -n $install_namespace --type merge --patch "{\"spec\":{\"version\": \"$tag_number\"}}"
-
-        # Specified alternative container imageLocation
-        if [ "${RELATED_IMAGE_URL_PREFIX}" != "" ]; then
-            kubectl patch alamedaservice $previous_alamedaservice -n $install_namespace --type merge --patch "{\"spec\":{\"imageLocation\": \"${RELATED_IMAGE_URL_PREFIX}\"}}"
-        fi
-
-        # Restart operator after patching alamedaservice
-        kubectl scale deployment federatorai-operator -n $install_namespace --replicas=0
-        kubectl scale deployment federatorai-operator -n $install_namespace --replicas=1
     fi
+    if [ "${ENABLE_RESOURCE_REQUIREMENT}" = "y" ] && [ "$storage_type" = "persistent" ]; then
+        cat >> ${alamedaservice_example} << __EOF__
+  alamedaInfluxdb:
+    resources:
+      requests:
+        cpu: 500m
+        memory: 500Mi
+    storages:
+    - usage: data
+      type: pvc
+      size: ${influxdb_size}Gi
+      class: ${storage_class}
+__EOF__
+    elif [ "${ENABLE_RESOURCE_REQUIREMENT}" = "y" ] && [ "$storage_type" = "ephemeral" ]; then
+        cat >> ${alamedaservice_example} << __EOF__
+  alamedaInfluxdb:
+    resources:
+      requests:
+        cpu: 500m
+        memory: 500Mi
+__EOF__
+    elif [ "${ENABLE_RESOURCE_REQUIREMENT}" != "y" ] && [ "$storage_type" = "persistent" ]; then
+        cat >> ${alamedaservice_example} << __EOF__
+  alamedaInfluxdb:
+    storages:
+    - usage: data
+      type: pvc
+      size: ${influxdb_size}Gi
+      class: ${storage_class}
+__EOF__
+    fi
+
+    kubectl apply -f $alamedaservice_example &>/dev/null
 else
-    echo -e "\nDownloading Federator.ai CR sample files ..."
-    download_cr_files
-    echo "Done"
-    echo -e "\nDownloading Federator.ai alamedascaler sample files ..."
-    download_alamedascaler_files
-    echo "Done"
-    kubectl apply -f $ALAMEDASERVICE_FILE_PATH >/dev/null
-    if [ "$?" != "0" ]; then
-        echo -e "\n$(tput setaf 1)Error! Failed to update alamedaservice file ($ALAMEDASERVICE_FILE_PATH).$(tput sgr 0)"
-        exit 1
+    # Upgrade case, patch version to alamedaservice only
+    kubectl patch alamedaservice $previous_alamedaservice -n $install_namespace --type merge --patch "{\"spec\":{\"version\": \"$tag_number\"}}"
+
+    # Specified alternative container imageLocation
+    if [ "${RELATED_IMAGE_URL_PREFIX}" != "" ]; then
+        kubectl patch alamedaservice $previous_alamedaservice -n $install_namespace --type merge --patch "{\"spec\":{\"imageLocation\": \"${RELATED_IMAGE_URL_PREFIX}\"}}"
     fi
+
+    # Restart operator after patching alamedaservice
+    kubectl scale deployment federatorai-operator -n $install_namespace --replicas=0
+    kubectl scale deployment federatorai-operator -n $install_namespace --replicas=1
 fi
 
 echo "Processing..."
@@ -1186,14 +1127,12 @@ if [ "$webhook_exist" != "y" ];then
     webhook_reminder
 fi
 
-###Configure data source from GUI
-#setup_data_adapter_secret
+setup_data_adapter_secret
 get_grafana_route $install_namespace
 get_restapi_route $install_namespace
 echo -e "$(tput setaf 6)\nInstall Federator.ai $tag_number successfully$(tput sgr 0)"
 check_previous_alamedascaler
-###Configure data source from GUI
-#setup_cluster_alamedascaler
+setup_cluster_alamedascaler
 leave_prog
 exit 0
 

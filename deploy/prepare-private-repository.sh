@@ -12,7 +12,7 @@ show_usage()
               (e.g., --tag v4.2.799)
             --push
             --repo-url [Private Repository URL]
-              (e.g., --repo-url repo.test.com/federatorai)
+              (e.g., --repo-url repo.prophetstor.com/federatorai)
 
         Scenario B - Pull Federator.ai containter images and save files locally
           Requirements:
@@ -24,7 +24,7 @@ show_usage()
           Requirements:
             --push
             --repo-url [Private Repository URL]
-              (e.g., --repo-url repo.test.com/federatorai)
+              (e.g., --repo-url repo.prophetstor.com/federatorai)
 
 __EOF__
     exit 1
