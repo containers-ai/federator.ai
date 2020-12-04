@@ -8,7 +8,7 @@
 #       [-c] # clean environment for preloader test
 #       [-e] # Enable preloader pod
 #       [-r] # Run preloader (normal mode: historical + current)
-#       [-o] # Run preloader (historical only)
+#       [-o] # Run preloader (historical + ab test)
 #       [-f future data point (hour)] # Run preloader future mode
 #       [-d] # Disable & Remove preloader
 #       [-v] # Revert environment to normal mode
@@ -17,8 +17,9 @@
 #   Standalone options:
 #       [-i] # Install Nginx
 #       [-k] # Remove Nginx
-#       [-t replica number] # Nginx default replica number (default:10) [e.g., -t 5]
-#       [-s enable execution] # Enable(default) or disable execution [e.g., -s false]
+#       [-b] # Retrigger ab test inside preloader pod
+#       [-g ab_traffic_ratio] # ab test traffic ratio (default:4000) [e.g., -g 4000]
+#       [-t replica number] # Nginx default replica number (default:5) [e.g., -t 5]
 #
 #################################################################################################################
 
@@ -31,7 +32,7 @@ show_usage()
         [-c] # clean environment for preloader test
         [-e] # Enable preloader pod
         [-r] # Run preloader (normal mode: historical + current)
-        [-o] # Run preloader (historical only)
+        [-o] # Run preloader (historical + ab test)
         [-f future data point (hour)] # Run preloader future mode
         [-d] # Disable & Remove preloader
         [-v] # Revert environment to normal mode
@@ -40,8 +41,9 @@ show_usage()
     Standalone options:
         [-i] # Install Nginx
         [-k] # Remove Nginx
-        [-t replica number] # Nginx default replica number (default:10) [e.g., -t 5]
-        [-s enable execution] # Enable(default) or disable execution [e.g., -s false]
+        [-b] # Retrigger ab test inside preloader pod
+        [-g ab_traffic_ratio] # ab test traffic ratio (default:4000) [e.g., -g 4000]
+        [-t replica number] # Nginx default replica number (default:5) [e.g., -t 5]
 
 __EOF__
     exit 1
@@ -257,21 +259,29 @@ run_ab_test()
 {
     echo -e "\n$(tput setaf 6)Running ab test in preloader...$(tput sgr 0)"
 
+    get_current_preloader_name
+    if [ "$current_preloader_pod_name" = "" ]; then
+        echo -e "\n$(tput setaf 1)ERROR! Can't find installed preloader pod.$(tput sgr 0)"
+        leave_prog
+        exit 8
+    fi
+
     # Modify parameters
     nginx_ip=$(kubectl -n $nginx_ns get svc|grep "${nginx_name}"|awk '{print $3}')
     [ "$nginx_ip" = "" ] && echo -e "$(tput setaf 1)Error! Can't get svc ip of namespace $nginx_ns$(tput sgr 0)" && return
 
     sed -i "s/SVC_IP=.*/SVC_IP=${nginx_ip}/g" ./$preloader_folder/generate_loads.sh
     sed -i "s/SVC_PORT=.*/SVC_PORT=${nginx_port}/g" ./$preloader_folder/generate_loads.sh
+    sed -i "s/traffic_ratio.*/traffic_ratio = ${traffic_ratio}/g" ./$preloader_folder/define.py
 
     for ab_file in "${ab_files_list[@]}"
     do
         kubectl cp -n $install_namespace $preloader_folder/$ab_file ${current_preloader_pod_name}:/opt/alameda/federatorai-agent/
     done
     # New traffic folder
-    kubectl -n $install_namespace exec $current_preloader_pod_name -- mkdir /opt/alameda/federatorai-agent/traffic
+    kubectl -n $install_namespace exec $current_preloader_pod_name -- mkdir -p /opt/alameda/federatorai-agent/traffic
     # trigger ab test
-    kubectl -n $install_namespace exec $current_preloader_pod_name -- bash -c "/opt/alameda/federatorai-agent/generate_loads.sh >run_output 2>run_output &"
+    kubectl -n $install_namespace exec $current_preloader_pod_name -- bash -c "bash /opt/alameda/federatorai-agent/generate_loads.sh >run_output 2>run_output &"
     if [ "$?" != "0" ]; then
         echo -e "\n$(tput setaf 1)Error! Failed to trigger ab test inside preloader.$(tput sgr 0)"
     fi
@@ -1047,6 +1057,30 @@ check_prediction_status()
     echo "Duration check_prediction_status() = $duration" >> $debug_log
 }
 
+check_deployment_status()
+{
+    period="$1"
+    interval="$2"
+    deploy_name="$3"
+    deploy_status_expected="$4"
+
+    for ((i=0; i<$period; i+=$interval)); do
+        kubectl -n $install_namespace get deploy $deploy_name >/dev/null 2>&1
+        if [ "$?" = "0" ] && [ "$deploy_status_expected" = "on" ]; then
+            echo -e "Depolyment $deploy_name exists."
+            return 0
+        elif [ "$?" != "0" ] && [ "$deploy_status_expected" = "off" ]; then
+            echo -e "Depolyment $deploy_name is gone."
+            return 0
+        fi
+        echo "Waiting for deployment $deploy_name become expected status ($deploy_status_expected)..."
+        sleep "$interval"
+    done
+    echo -e "\n$(tput setaf 1)Error!! Waited for $period seconds, but deployment $deploy_name status is not ($deploy_status_expected).$(tput sgr 0)"
+    leave_prog
+    exit 7
+}
+
 switch_alameda_executor_in_alamedaservice()
 {
     start=`date +%s`
@@ -1063,6 +1097,7 @@ switch_alameda_executor_in_alamedaservice()
             exit 8
         fi
         modified="y"
+        check_deployment_status 180 10 "alameda-executor" "on"
     elif [ "$current_executor_pod_name" != "" ] && [ "$switch_option" = "off" ]; then
         # Turn off
         echo -e "\n$(tput setaf 6)Disable executor in alamedaservice...$(tput sgr 0)"
@@ -1073,6 +1108,7 @@ switch_alameda_executor_in_alamedaservice()
             exit 8
         fi
         modified="y"
+        check_deployment_status 180 10 "alameda-executor" "off"
     fi
 
     if [ "$modified" = "y" ]; then
@@ -1120,6 +1156,7 @@ enable_preloader_in_alamedaservice()
         fi
     fi
     # Check if preloader is ready
+    check_deployment_status 180 10 "federatorai-agent-preloader" "on"
     echo ""
     wait_until_pods_ready 600 30 $install_namespace 5
     get_current_preloader_name
@@ -1198,6 +1235,7 @@ disable_preloader_in_alamedaservice()
         fi
 
         # Check if preloader is removed and other pods are ready
+        check_deployment_status 180 10 "federatorai-agent-preloader" "off"
         echo ""
         wait_until_pods_ready 600 30 $install_namespace 5
         get_current_preloader_name
@@ -1225,7 +1263,7 @@ if [ "$#" -eq "0" ]; then
     exit
 fi
 
-while getopts "f:n:t:x:cdehikprvo" o; do
+while getopts "f:n:t:x:g:cdehikprvob" o; do
     case "${o}" in
         p)
             prepare_environment="y"
@@ -1242,6 +1280,9 @@ while getopts "f:n:t:x:cdehikprvo" o; do
         e)
             enable_preloader="y"
             ;;
+        b)
+            run_ab_from_preloader="y"
+            ;;
         r)
             run_preloader_with_normal_mode="y"
             ;;
@@ -1256,14 +1297,18 @@ while getopts "f:n:t:x:cdehikprvo" o; do
             replica_num_specified="y"
             t_arg=${OPTARG}
             ;;
-        s)
-            enable_execution_specified="y"
-            s_arg=${OPTARG}
-            ;;
+        # s)
+        #     enable_execution_specified="y"
+        #     s_arg=${OPTARG}
+        #     ;;
         # x)
         #     autoscaling_specified="y"
         #     x_arg=${OPTARG}
         #     ;;
+        g)
+            traffic_ratio_specified="y"
+            g_arg=${OPTARG}
+            ;;
         n)
             nginx_name_specified="y"
             n_arg=${OPTARG}
@@ -1292,8 +1337,28 @@ if [ "$future_mode_enabled" = "y" ]; then
     esac
 fi
 
+if [ "$traffic_ratio_specified" = "y" ]; then
+    traffic_ratio=$g_arg
+    case $traffic_ratio in
+        ''|*[!0-9]*) echo -e "\n$(tput setaf 1)ab test traffic ratio needs to be an integer.$(tput sgr 0)" && show_usage ;;
+        *) ;;
+    esac
+else
+    traffic_ratio="4000"
+fi
+
 if [ "$run_preloader_with_normal_mode" = "y" ] && [ "$run_preloader_with_historical_only" = "y" ]; then
-    echo -e "\n$(tput setaf 1)Error! You can specify either the '-r' or the '-o' parameter, but not both." && show_usage
+    echo -e "\n$(tput setaf 1)Error! You can specify either the '-r' or the '-o' parameter, but not both.$(tput sgr 0)" && show_usage
+    exit 3
+fi
+
+if [ "$run_preloader_with_normal_mode" = "y" ] && [ "$run_ab_from_preloader" = "y" ]; then
+    echo -e "\n$(tput setaf 1)Error! You can specify either the '-r' or the '-b' parameter, but not both.$(tput sgr 0)" && show_usage
+    exit 3
+fi
+
+if [ "$run_preloader_with_historical_only" = "y" ] && [ "$run_ab_from_preloader" = "y" ]; then
+    echo -e "\n$(tput setaf 1)Error! You can specify either the '-o' or the '-b' parameter, but not both.$(tput sgr 0)" && show_usage
     exit 3
 fi
 
@@ -1306,15 +1371,6 @@ if [ "$replica_num_specified" = "y" ]; then
 else
     # default replica
     replica_number="5"
-fi
-
-if [ "$enable_execution_specified" = "y" ]; then
-    enable_execution=$s_arg
-    if [ "$enable_execution" != "true" ] && [ "$enable_execution" != "false" ]; then
-        echo -e "\n$(tput setaf 1) Enable execution value needs to be \"true\" or \"false\".$(tput sgr 0)" && show_usage
-    fi
-else
-    enable_execution="true"
 fi
 
 # if [ "$autoscaling_specified" = "y" ]; then
@@ -1379,7 +1435,7 @@ mkdir -p $file_folder
 current_location=`pwd`
 # copy preloader ab files if run historical only mode enabled
 preloader_folder="preloader_ab_runner"
-if [ "$run_preloader_with_historical_only" = "y" ]; then
+if [ "$run_preloader_with_historical_only" = "y" ] || [ "$run_ab_from_preloader" = "y" ]; then
     # Check folder exists
     [ ! -d "$preloader_folder" ] && echo -e "$(tput setaf 1)Error! Can't locate $preloader_folder folder.$(tput sgr 0)" && exit 3
 
@@ -1420,8 +1476,6 @@ if [ "$prepare_environment" = "y" ]; then
     patch_grafana_for_preloader
     patch_data_adapter_for_preloader "true"
     check_influxdb_retention
-    add_alamedascaler_for_nginx
-    add_dd_tags_to_executor_env
 fi
 
 if [ "$clean_environment" = "y" ]; then
@@ -1429,19 +1483,26 @@ if [ "$clean_environment" = "y" ]; then
 fi
 
 if [ "$enable_preloader" = "y" ]; then
-    if [ "$enable_execution" = "true" ]; then
-        switch_alameda_executor_in_alamedaservice "on"
-    fi
     enable_preloader_in_alamedaservice
+fi
+
+if [ "$run_ab_from_preloader" = "y" ]; then
+    run_ab_test
 fi
 
 if [ "$run_preloader_with_normal_mode" = "y" ] || [ "$run_preloader_with_historical_only" = "y" ]; then
     # Move scale_down_pods into run_preloader_command method
     #scale_down_pods
     if [ "$run_preloader_with_normal_mode" = "y" ]; then
+        enable_execution="true"
+        add_alamedascaler_for_nginx
+        switch_alameda_executor_in_alamedaservice "on"
+        add_dd_tags_to_executor_env
         run_preloader_command "normal"
     else
         # run_preloader_with_historical_only = "y"
+        enable_execution="false"
+        add_alamedascaler_for_nginx
         run_preloader_command "historical_only"
     fi
     verify_metrics_exist
