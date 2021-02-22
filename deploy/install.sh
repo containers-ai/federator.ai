@@ -23,6 +23,14 @@
 #   -i followed by influxdb_size
 #   -c followed by storage_class
 #   -x followed by expose_service (y or n)
+#
+#   4. AWS support
+#      Usage: ./install.sh --image-path 88888976.dkr.ecr.us-east-1.amazonaws.com/888888-37c8-4328-91b2-62c1acd2a04b/cg-1231030144/federatorai-operator:4.2-latest
+#                   --cluster awsmp-new --region us-west-2
+#
+#   --image-path <space> AWS ECR url
+#   --cluster <space> AWS EKS cluster name
+#   --region <space> AWS region
 #################################################################################################################
 
 is_pod_ready()
@@ -69,7 +77,7 @@ webhook_reminder()
 {
     if [ "$openshift_minor_version" != "" ]; then
         echo -e "\n========================================"
-        echo -e "$(tput setaf 9)Note!$(tput setaf 10) The following $(tput setaf 9)two admission plugins $(tput setaf 10)need to be enabled on $(tput setaf 9)each master node $(tput setaf 10)to make Email Notification work properly."
+        echo -e "$(tput setaf 9)Note!$(tput setaf 10) The following $(tput setaf 9)two admission plugins $(tput setaf 10)need to be enabled on $(tput setaf 9)each master node $(tput setaf 10)to make Federator.ai work properly."
         echo -e "$(tput setaf 6)1. ValidatingAdmissionWebhook 2. MutatingAdmissionWebhook$(tput sgr 0)"
         echo -e "Steps: (On every master nodes)"
         echo -e "A. Edit /etc/origin/master/master-config.yaml"
@@ -640,6 +648,10 @@ backup_configuration()
         mkdir -p $backup_folder
         echo "Backup configuration..."
         bash $script_located_path/$script_name -b -d $backup_path -t $tag_number
+        if [ "$?" != "0" ]; then
+            echo -e "\n$(tput setaf 1)Error! Failed to do configuration backup.$(tput sgr 0)"
+            exit 8
+        fi
         echo "Done."
     else
         # do_backup = 'n'
@@ -689,9 +701,151 @@ backup_configuration()
 #     fi
 # }
 
+check_aws_version()
+{
+    awscli_required_version="1.16.283"
+    awscli_required_version_major=`echo $awscli_required_version | cut -d'.' -f1`
+    awscli_required_version_minor=`echo $awscli_required_version | cut -d'.' -f2`
+    awscli_required_version_build=`echo $awscli_required_version | cut -d'.' -f3`
 
-while getopts "t:n:e:p:s:l:d:c:x:o" o; do
+    # aws --version: aws-cli/2.0.0dev0
+    awscli_version=`aws --version 2>&1 | cut -d' ' -f1 | cut -d'/' -f2`
+    awscli_version_major=`echo $awscli_version | cut -d'.' -f1`
+    awscli_version_minor=`echo $awscli_version | cut -d'.' -f2`
+    awscli_version_build=`echo $awscli_version | cut -d'.' -f3`
+    awscli_version_build=${awscli_version_build%%[^0-9]*}   # remove everything from the first non-digit
+
+    if [ "$awscli_version_major" -gt "$awscli_required_version_major" ]; then
+        return 0
+    fi
+
+    if [ "$awscli_version_major" = "$awscli_required_version_major" ] && \
+        [ "$awscli_version_minor" -gt "$awscli_required_version_minor" ]; then
+            return 0
+    fi
+
+    if [ "$awscli_version_major" = "$awscli_required_version_major" ] && \
+        [ "$awscli_version_minor" = "$awscli_required_version_minor" ] && \
+        [ "$awscli_version_build" -ge "$awscli_required_version_build" ]; then
+            return 0
+    fi
+
+    echo -e "\n$(tput setaf 10)Error! AWS CLI version must be $awscli_required_version or greater.$(tput sgr 0)"
+    exit 9
+}
+
+setup_aws_iam_role()
+{
+    REGION_NAME=$aws_region
+    CLUSTER_NAME=$eks_cluster
+
+    # Create an OIDC provider for the cluster
+    ISSUER_URL=$(aws eks describe-cluster \
+                    --name $CLUSTER_NAME \
+                    --region $REGION_NAME \
+                    --query cluster.identity.oidc.issuer \
+                    --output text )
+    ISSUER_URL_WITHOUT_PROTOCOL=$(echo $ISSUER_URL | sed 's/https:\/\///g' )
+    ISSUER_HOSTPATH=$(echo $ISSUER_URL_WITHOUT_PROTOCOL | sed "s/\/id.*//" )
+    # Grab all certificates associated with the issuer hostpath and save them to files. The root certificate is last
+    rm -f *.crt || echo "No files that match *.crt exist"
+    ROOT_CA_FILENAME=$(openssl s_client -showcerts -connect $ISSUER_HOSTPATH:443 < /dev/null 2>&1 \
+                        | awk '/BEGIN/,/END/{ if(/BEGIN/){a++}; out="cert"a".crt"; print > out } END {print "cert"a".crt"}')
+    ROOT_CA_FINGERPRINT=$(openssl x509 -fingerprint -noout -in $ROOT_CA_FILENAME \
+                        | sed 's/://g' | sed 's/SHA1 Fingerprint=//')
+    result=$(aws iam create-open-id-connect-provider \
+                --url $ISSUER_URL \
+                --thumbprint-list $ROOT_CA_FINGERPRINT \
+                --client-id-list sts.amazonaws.com \
+                --region $REGION_NAME 2>&1 | grep EntityAlreadyExists)
+    if [ "$result" != "" ]; then
+        echo "The provider for $ISSUER_URL already exists"
+    fi
+
+    ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+    PROVIDER_ARN="arn:aws:iam::$ACCOUNT_ID:oidc-provider/$ISSUER_URL_WITHOUT_PROTOCOL"
+    ROLE_NAME="FederatorAI-$CLUSTER_NAME"
+    POLICY_NAME="AWSMarketplaceMetering-$CLUSTER_NAME"
+    POLICY_ARN="arn:aws:iam::$ACCOUNT_ID:policy/$POLICY_NAME"
+
+    # Update trust relationships of pod execution roles so pods on our cluster can assume them
+    cat > trust-policy.json << EOF
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Principal": {
+                "Federated": "$PROVIDER_ARN"
+            },
+            "Action": "sts:AssumeRoleWithWebIdentity"
+        }
+    ]
+}
+EOF
+
+    result=$(aws iam create-role \
+                --role-name $ROLE_NAME \
+                --assume-role-policy-document file://trust-policy.json 2>&1 | grep EntityAlreadyExists)
+    if [ "$result" != "" ]; then
+        echo "The IAM role $ROLE_NAME already exists"
+    fi
+
+    # Attach policy to give required permission to call RegisterUsage API
+cat > iam-policy.json << EOF
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Action": [
+                "aws-marketplace:RegisterUsage"
+            ],
+            "Effect": "Allow",
+            "Resource": "*"
+        }
+    ]
+}
+EOF
+    result=$(aws iam create-policy \
+        --policy-name $POLICY_NAME \
+        --policy-document file://iam-policy.json 2>&1 | grep EntityAlreadyExists)
+    if [ "$result" != "" ]; then
+        echo "The policy $POLICY_NAME already exists"
+    fi
+
+    aws iam attach-role-policy --role-name $ROLE_NAME --policy-arn $POLICY_ARN
+}
+
+while getopts "t:n:e:p:s:l:d:c:x:o-:" o; do
     case "${o}" in
+        -)
+            case "${OPTARG}" in
+                image-path)
+                    ecr_url="${!OPTIND}"; OPTIND=$(( $OPTIND + 1 ))
+                    if [ "$ecr_url" = "" ]; then
+                        echo "Error! Missing --${OPTARG} value"
+                        exit
+                    fi
+                    ;;
+                cluster)
+                    eks_cluster="${!OPTIND}"; OPTIND=$(( $OPTIND + 1 ))
+                    if [ "$eks_cluster" = "" ]; then
+                        echo "Error! Missing --${OPTARG} value"
+                        exit
+                    fi
+                    ;;
+                region)
+                    aws_region="${!OPTIND}"; OPTIND=$(( $OPTIND + 1 ))
+                    if [ "$aws_region" = "" ]; then
+                        echo "Error! Missing --${OPTARG} value"
+                        exit
+                    fi
+                    ;;
+                *)
+                    echo "Unknown option --${OPTARG}"
+                    exit
+                    ;;
+            esac;;
         o)
             offline_mode_enabled="y"
             ;;
@@ -730,6 +884,22 @@ while getopts "t:n:e:p:s:l:d:c:x:o" o; do
             ;;
     esac
 done
+
+# ecr_url, eks_cluster, aws_region all are empty or all have values
+if [ "$ecr_url" != "" ] && [ "$eks_cluster" != "" ] && [ "$aws_region" != "" ]; then
+    aws_mode="y"
+elif [ "$ecr_url" != "" ] || [ "$eks_cluster" != "" ] || [ "$aws_region" != "" ]; then
+    if [ "$ecr_url" = "" ]; then
+        echo -e "\n$(tput setaf 1)Error! Missing --image-path parameter in AWS mode.$(tput sgr 0)"
+        exit
+    elif [ "$eks_cluster" = "" ]; then
+        echo -e "\n$(tput setaf 1)Error! Missing --cluster parameter in AWS mode.$(tput sgr 0)"
+        exit
+    elif [ "$aws_region" = "" ]; then
+        echo -e "\n$(tput setaf 1)Error! Missing --region parameter in AWS mode.$(tput sgr 0)"
+        exit
+    fi
+fi
 
 [ "${t_arg}" = "" ] && silent_mode_disabled="y"
 [ "${n_arg}" = "" ] && silent_mode_disabled="y"
@@ -777,6 +947,12 @@ fi
 echo "Checking environment version..."
 check_version
 echo "...Passed"
+
+if [ "$aws_mode" = "y" ]; then
+    echo -e "Checking AWS CLI version..."
+    check_aws_version
+    echo -e "...Passed\n"
+fi
 
 if [ "$offline_mode_enabled" != "y" ]; then
     which curl > /dev/null 2>&1
@@ -914,6 +1090,14 @@ current_location=`pwd`
 script_located_path=$(dirname $(readlink -f "$0"))
 cd $file_folder
 
+if [ "$aws_mode" = "y" ]; then
+    # Setup AWS IAM role for service account
+    echo -e "\n$(tput setaf 2)Setting AWS IAM role for service account...$(tput sgr 0)"
+    setup_aws_iam_role
+    role_arn=$(aws iam get-role --role-name ${ROLE_NAME} --query Role.Arn --output text)
+    echo "Done"
+fi
+
 if [ "$need_upgrade" = "y" ];then
     source_full_tag=$(echo "$previous_tag"|cut -d '-' -f1)
     source_tag_first_digit=${source_full_tag%%.*}
@@ -968,7 +1152,17 @@ fi
 
 # Modify federator.ai operator yaml(s)
 # for tag
-sed -i "s/:latest$/:${tag_number}/g" 03*.yaml
+if [ "$aws_mode" = "y" ]; then
+    sed -i "s|quay.io/prophetstor/federatorai-operator-ubi:latest|$ecr_url|g" 03*.yaml
+    #sed -i "/\- federatorai-operator/d" 03*.yaml
+    #sed -i "/command:/d" 03*.yaml
+cat >> 01*.yaml << __EOF__
+  annotations:
+    eks.amazonaws.com/role-arn: ${role_arn}
+__EOF__
+else
+    sed -i "s/:latest$/:${tag_number}/g" 03*.yaml
+fi
 
 # Specified alternative container image location
 if [ "${RELATED_IMAGE_URL_PREFIX}" != "" ]; then
@@ -1335,11 +1529,50 @@ __EOF__
             exit 1
         fi
     else
-        if [ "$target_tag_first_digit" -gt "$source_tag_first_digit" ] || [ "$target_tag_middle_digit" -gt "$source_tag_middle_digit" ]; then
-            kubectl patch alamedaservice $previous_alamedaservice -n $install_namespace --type merge --patch "{\"spec\":{\"enableExecution\": true}}"
+        # Upgrade case
+        _count=10
+        _sleep=30
+        while [ "$_count" -gt "0" ]
+        do
+            echo -e "Update alamedaservice..."
+            if [ "$target_tag_first_digit" -gt "$source_tag_first_digit" ] || [ "$target_tag_middle_digit" -gt "$source_tag_middle_digit" ]; then
+                # Upgrade from older version, patch version and enableExecution
+                kubectl patch alamedaservice $previous_alamedaservice -n $install_namespace --type merge --patch "{\"spec\":{\"enableExecution\": true,\"version\": \"$tag_number\"}}"
+            else
+                # Patch version only
+                kubectl patch alamedaservice $previous_alamedaservice -n $install_namespace --type merge --patch "{\"spec\":{\"version\": \"$tag_number\"}}"
+            fi
+
+            if [ "$?" = "0" ]; then
+                # Double check version info in alamedaservice
+                version_inside=$(kubectl get alamedaservice $previous_alamedaservice -n $install_namespace -o jsonpath='{.spec.version}')
+                if [ "$version_inside" == "$tag_number" ]; then
+                    echo -e "$(tput setaf 3)Done.$(tput sgr 0)"
+                    patch_done="y"
+                    break
+                fi
+            fi
+            # Patch failure
+            echo -e "$(tput setaf 3)Warning! Update alamedaservice failure. Sleep $_sleep seconds and retry...$(tput sgr 0)"
+            _count=$(($_count-1))
+            sleep $_sleep
+        done
+
+        if [ "$patch_done" != "y" ]; then
+            echo -e "\n$(tput setaf 1)Error! Failed to update alamedaservice.(tput sgr 0)"
+            exit 7
         fi
-        # Upgrade case, patch version to alamedaservice only
-        kubectl patch alamedaservice $previous_alamedaservice -n $install_namespace --type merge --patch "{\"spec\":{\"version\": \"$tag_number\"}}"
+
+        # Add sysdig entry inside secret if needed
+        sysdig_info=$(kubectl get secret federatorai-data-adapter-secret -n $install_namespace -o jsonpath='{.data.sysdig_api_token}')
+        if [ "$sysdig_info" == "" ]; then
+            sysdig_token=$(echo -n "dummy" | base64 )
+            kubectl patch secret federatorai-data-adapter-secret -n $install_namespace --type merge --patch "{\"data\":{\"sysdig_api_token\": \"$sysdig_token\"}}"
+            if [ "$?" != "0" ]; then
+                echo -e "\n$(tput setaf 1)Error! Failed to update sysdig dummy token in data adapter secret.$(tput sgr 0)"
+                exit 1
+            fi
+        fi
 
         # Specified alternative container imageLocation
         if [ "${RELATED_IMAGE_URL_PREFIX}" != "" ]; then
@@ -1373,8 +1606,8 @@ __EOF__
             fi
         fi
         # Restart operator after patching alamedaservice
-        kubectl scale deployment federatorai-operator -n $install_namespace --replicas=0
-        kubectl scale deployment federatorai-operator -n $install_namespace --replicas=1
+        #kubectl scale deployment federatorai-operator -n $install_namespace --replicas=0
+        #kubectl scale deployment federatorai-operator -n $install_namespace --replicas=1
     fi
 else
     echo -e "\nDownloading Federator.ai CR sample files ..."
@@ -1394,6 +1627,15 @@ echo "Processing..."
 check_if_pod_match_expected_version "datahub" $max_wait_pods_ready_time 60 $install_namespace
 wait_until_pods_ready $max_wait_pods_ready_time 60 $install_namespace 5
 wait_until_cr_ready $max_wait_pods_ready_time 60 $install_namespace
+
+if [ "$need_upgrade" = "y" ];then
+    # Drop fedemeter measurements during upgrade (4.2, 4.3, 4.3.1 upgrade to 4.4 or later)
+    if [ "$target_tag_first_digit" -ge "4" ] && [ "$target_tag_middle_digit" -ge "4" ] && [ "$source_tag_first_digit" -eq "4" ] && [ "$source_tag_middle_digit" -lt "4" ]; then
+        influxdb_name="alameda-influxdb-0"
+        database_name="alameda_fedemeter"
+        kubectl exec $influxdb_name -n $install_namespace -- influx -ssl -unsafeSsl -precision rfc3339 -username admin -password adminpass -database $database_name -execute "drop measurement calculation_price_instance;drop measurement calculation_price_storage;drop measurement recommendation_jeri;"
+    fi
+fi
 
 webhook_exist_checker
 if [ "$webhook_exist" != "y" ];then
