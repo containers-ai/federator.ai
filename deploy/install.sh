@@ -1100,21 +1100,34 @@ fi
 
 if [ "$need_upgrade" = "y" ];then
     source_full_tag=$(echo "$previous_tag"|cut -d '-' -f1)
-    source_tag_first_digit=${source_full_tag%%.*}
-    source_tag_last_digit=${source_full_tag##*.}
-    source_tag_middle_digit=${source_full_tag##$source_tag_first_digit.}
-    source_tag_middle_digit=${source_tag_middle_digit%%.$source_tag_last_digit}
-    source_tag_first_digit=$(echo $source_tag_first_digit|cut -d 'v' -f2)
+    if [ "$source_full_tag" = "dev" ]; then
+        source_tag_first_digit=""
+        source_tag_middle_digit=""
+        source_tag_last_digit=""
+    else
+        source_tag_first_digit=${source_full_tag%%.*}
+        source_tag_last_digit=${source_full_tag##*.}
+        source_tag_middle_digit=${source_full_tag##$source_tag_first_digit.}
+        source_tag_middle_digit=${source_tag_middle_digit%%.$source_tag_last_digit}
+        source_tag_first_digit=$(echo $source_tag_first_digit|cut -d 'v' -f2)
+
+    fi
 
     target_full_tag=$(echo "$tag_number"|cut -d '-' -f1)
-    target_tag_first_digit=${target_full_tag%%.*}
-    target_tag_last_digit=${target_full_tag##*.}
-    target_tag_middle_digit=${target_full_tag##$target_tag_first_digit.}
-    target_tag_middle_digit=${target_tag_middle_digit%%.$target_tag_last_digit}
-    target_tag_first_digit=$(echo $target_tag_first_digit|cut -d 'v' -f2)
+    if [ "$target_full_tag" = "dev" ]; then
+        target_tag_first_digit=""
+        target_tag_middle_digit=""
+        target_tag_last_digit=""
+    else
+        target_tag_first_digit=${target_full_tag%%.*}
+        target_tag_last_digit=${target_full_tag##*.}
+        target_tag_middle_digit=${target_full_tag##$target_tag_first_digit.}
+        target_tag_middle_digit=${target_tag_middle_digit%%.$target_tag_last_digit}
+        target_tag_first_digit=$(echo $target_tag_first_digit|cut -d 'v' -f2)
+    fi
 
     # Only do backup when major or middle digit bigger than previous build
-    if [ "$target_tag_first_digit" -gt "$source_tag_first_digit" ] || [ "$target_tag_middle_digit" -gt "$source_tag_middle_digit" ]; then
+    if [ "0${target_tag_first_digit}" -gt "0${source_tag_first_digit}" ] || [ "0${target_tag_middle_digit}" -gt "0${source_tag_middle_digit}" ]; then
         backup_configuration
     fi
 fi
@@ -1535,7 +1548,7 @@ __EOF__
         while [ "$_count" -gt "0" ]
         do
             echo -e "Update alamedaservice..."
-            if [ "$target_tag_first_digit" -gt "$source_tag_first_digit" ] || [ "$target_tag_middle_digit" -gt "$source_tag_middle_digit" ]; then
+            if [ "0${target_tag_first_digit}" -gt "0${source_tag_first_digit}" ] || [ "0${target_tag_middle_digit}" -gt "0${source_tag_middle_digit}" ]; then
                 # Upgrade from older version, patch version and enableExecution
                 kubectl patch alamedaservice $previous_alamedaservice -n $install_namespace --type merge --patch "{\"spec\":{\"enableExecution\": true,\"version\": \"$tag_number\"}}"
             else
@@ -1630,7 +1643,7 @@ wait_until_cr_ready $max_wait_pods_ready_time 60 $install_namespace
 
 if [ "$need_upgrade" = "y" ];then
     # Drop fedemeter measurements during upgrade (4.2, 4.3, 4.3.1 upgrade to 4.4 or later)
-    if [ "$target_tag_first_digit" -ge "4" ] && [ "$target_tag_middle_digit" -ge "4" ] && [ "$source_tag_first_digit" -eq "4" ] && [ "$source_tag_middle_digit" -lt "4" ]; then
+    if [ "0${target_tag_first_digit}" -ge "4" ] && [ "0${target_tag_middle_digit}" -ge "4" ] && [ "0${source_tag_first_digit}" -eq "4" ] && [ "0${source_tag_middle_digit}" -lt "4" ]; then
         influxdb_name="alameda-influxdb-0"
         database_name="alameda_fedemeter"
         kubectl exec $influxdb_name -n $install_namespace -- influx -ssl -unsafeSsl -precision rfc3339 -username admin -password adminpass -database $database_name -execute "drop measurement calculation_price_instance;drop measurement calculation_price_storage;drop measurement recommendation_jeri;"
