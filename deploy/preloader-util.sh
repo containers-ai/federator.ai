@@ -420,7 +420,7 @@ run_preloader_command()
         exit 5
     fi
 
-    if [ "$running_mode" = "historical_only" ]; then
+    if [ "$running_mode" = "historical_only" ] && [ "$cluster_type" != "vm" ]; then
         run_ab_test
     fi
 
@@ -540,7 +540,7 @@ patch_data_adapter_for_preloader()
     if [ "$current_flag_value" != "" ]; then
         if [ "$current_flag_value" != "$only_mode" ]; then
             # Get COLLECT_METADATA_ONLY index in env array
-            patch_index=$(kubectl get alamedaservice $alamedaservice_name -n $install_namespace -o jsonpath='{.spec.federatoraiDataAdapter.env[*]}'|sed 's/]/\n/g'|awk '{print NR-1 "," $0}'|grep "name:COLLECT_METADATA_ONLY"|cut -d ',' -f1)
+            patch_index=$(kubectl get alamedaservice $alamedaservice_name -n $install_namespace -o jsonpath='{.spec.federatoraiDataAdapter.env[*]}'|sed 's/}/\n/g'|awk '{print NR-1 "," $0}'|grep "COLLECT_METADATA_ONLY"|cut -d ',' -f1)
             if [ "$patch_index" != "" ]; then
                 # replace value at $patch_index
                 kubectl patch alamedaservice $alamedaservice_name -n $install_namespace --type json --patch "[ { \"op\" : \"replace\" , \"path\" : \"/spec/federatoraiDataAdapter/env/${patch_index}\" , \"value\" : { \"name\" : \"COLLECT_METADATA_ONLY\", \"value\" : \"$only_mode\" } } ]"
@@ -1799,10 +1799,13 @@ fi
 if [ "$revert_environment" = "y" ]; then
     # scale up if any failure encounter previously or program abort
     scale_up_pods
-    delete_all_alamedascaler
-    delete_nginx_example
-    #patch_datahub_back_to_normal
-    #patch_grafana_back_to_normal
+    if [ "$cluster_type" != "vm" ]; then
+        # K8S
+        delete_all_alamedascaler
+        delete_nginx_example
+        #patch_datahub_back_to_normal
+        #patch_grafana_back_to_normal
+    fi
     patch_data_adapter_for_preloader "false"
     clean_environment_operations
 fi
