@@ -1183,6 +1183,20 @@ if [ "${ENABLE_RESOURCE_REQUIREMENT}" = "y" ]; then
     sed -i -e "/image: /a\          resources:\n            limits:\n              cpu: 4000m\n              memory: 8000Mi\n            requests:\n              cpu: 100m\n              memory: 100Mi" `ls 03*.yaml`
 fi
 
+if [ "$need_upgrade" = "y" ];then
+    # for upgrade - update owner of influxdb
+    current_influxdb_owner="$(kubectl -n $install_namespace exec alameda-influxdb-0 -- id -u)"
+    if [ "$current_influxdb_owner" = "0" ]; then
+        # Currently, the owner is root
+        echo -e "\n$(tput setaf 2)Updating InfluxDB owner...$(tput sgr 0)"
+        kubectl -n $install_namespace exec alameda-influxdb-0 -- chown -R 1001:1001 /var/log/influxdb
+        kubectl -n $install_namespace exec alameda-influxdb-0 -- chown -R 1001:1001 /var/lib/influxdb
+        kubectl -n $install_namespace exec alameda-influxdb-0 -- chmod -R 777 /var/log/influxdb
+        kubectl -n $install_namespace exec alameda-influxdb-0 -- chmod -R 777 /var/lib/influxdb
+        echo "Done"
+    fi
+fi
+
 echo -e "\n$(tput setaf 2)Applying Federator.ai operator yaml files...$(tput sgr 0)"
 
 if [ "$need_upgrade" = "y" ];then
@@ -1285,8 +1299,8 @@ if [ "$ALAMEDASERVICE_FILE_PATH" = "" ]; then
             done
 
             if [[ "$storage_type" == "persistent" ]]; then
-                default="10"
-                read -r -p "$(tput setaf 127)Specify log storage size [e.g., 10 for 10GB, default: 10]: $(tput sgr 0)" log_size </dev/tty
+                default="2"
+                read -r -p "$(tput setaf 127)Specify log storage size [e.g., 2 for 2GB, default: 2]: $(tput sgr 0)" log_size </dev/tty
                 log_size=${log_size:-$default}
                 default="10"
                 read -r -p "$(tput setaf 127)Specify AI engine storage size [e.g., 10 for 10GB, default: 10]: $(tput sgr 0)" aiengine_size </dev/tty
