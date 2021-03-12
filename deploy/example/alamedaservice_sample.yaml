@@ -6,7 +6,6 @@ metadata:
 spec:
   keycode:
     codeNumber: FFSFM-RGBTF-F7I7O-UFKPM-LL6VI-QVFNQ
-  enableExecution: true
   version: latest               ## for Federator.ai components
   imageLocation: quay.io/prophetstor
   storages:                     ## see following details for where it is used in each component
