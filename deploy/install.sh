@@ -621,7 +621,7 @@ download_alamedascaler_files()
 backup_configuration()
 {
     script_name="backup-restore.sh"
-    backup_folder="/tmp/configuration_backup"
+    backup_folder="$save_path/configuration_backup"
     default="y"
     read -r -p "$(tput setaf 2)Do you want to backup your configuration before upgrading Federator.ai? [default: $default]: $(tput sgr 0)" do_backup </dev/tty
     do_backup=${do_backup:-$default}
@@ -909,6 +909,7 @@ fi
 #[ "${e_arg}" = "" ] && silent_mode_disabled="y"
 #[ "${p_arg}" = "" ] && silent_mode_disabled="y"
 [ "${s_arg}" = "" ] && silent_mode_disabled="y"
+[ "${FEDERATOR_FILES_PATH}" = "" ] && silent_mode_disabled="y"
 [ "${s_arg}" = "persistent" ] && [ "${l_arg}" = "" ] && silent_mode_disabled="y"
 [ "${s_arg}" = "persistent" ] && [ "${d_arg}" = "" ] && silent_mode_disabled="y"
 [ "${s_arg}" = "persistent" ] && [ "${c_arg}" = "" ] && silent_mode_disabled="y"
@@ -1017,6 +1018,26 @@ if [ "$previous_alameda_namespace" != "" ];then
     fi
 fi
 
+if [ "$FEDERATOR_FILES_PATH" = "" ]; then
+    default="/opt"
+    read -r -p "$(tput setaf 2)Please input Federator.ai files save path [default: $default]: $(tput sgr 0) " save_path </dev/tty
+    save_path=${save_path:-$default}
+    save_path=$(echo "$save_path" | tr '[:upper:]' '[:lower:]')
+else
+    save_path="$FEDERATOR_FILES_PATH"
+fi
+
+file_folder="$save_path/install-op"
+if [ -d "$file_folder" ]; then
+    rm -rf $file_folder
+fi
+
+mkdir -p $file_folder
+if [ ! -d "$file_folder" ]; then
+    echo -e "\n$(tput setaf 1)Error! Failed to create input folder to save Federator.ai files.$(tput sgr 0)"
+    exit 3
+fi
+
 if [ "$ALAMEDASERVICE_FILE_PATH" = "" ]; then
     if [ "$silent_mode_disabled" = "y" ];then
 
@@ -1058,6 +1079,7 @@ if [ "$ALAMEDASERVICE_FILE_PATH" = "" ]; then
         echo -e "\n----------------------------------------"
         echo "tag_number=$specified_tag_number"
         echo "install_namespace=$install_namespace"
+        echo "save_path=$save_path"
         #echo "enable_execution=$enable_execution"
         #echo "prometheus_address=$prometheus_address"
         echo "storage_type=$storage_type"
@@ -1084,11 +1106,8 @@ else
     fi
 fi
 
-file_folder="/tmp/install-op"
 [ "$max_wait_pods_ready_time" = "" ] && max_wait_pods_ready_time=900  # maximum wait time for pods become ready
 
-rm -rf $file_folder
-mkdir -p $file_folder
 current_location=`pwd`
 script_located_path=$(dirname $(readlink -f "$0"))
 cd $file_folder
