@@ -61,6 +61,15 @@ pods_ready()
 
 leave_prog()
 {
+    # Clean up
+    if [ -d "$tgz_folder_name" ]; then
+        rm -rf $tgz_folder_name
+    fi
+
+    if [ -f "$tgz_name" ]; then
+        rm -f $tgz_name
+    fi
+
     echo -e "\n$(tput setaf 5)Downloaded YAML files are located under $file_folder $(tput sgr 0)"
     cd $current_location > /dev/null
 }
@@ -585,10 +594,7 @@ download_cr_files()
 
     for file_name in "${cr_files[@]}"
     do
-        if ! curl -sL --fail https://raw.githubusercontent.com/containers-ai/prophetstor/${tag_number}/deploy/example/${file_name} -O; then
-            echo -e "\n$(tput setaf 1)Abort, download $file_name sample file failed!!!$(tput sgr 0)"
-            exit 3
-        fi
+        cp $tgz_folder_name/deploy/example/$file_name .
     done
 }
 
@@ -601,10 +607,7 @@ download_alamedascaler_files()
 
     for pool in "${src_pool[@]}"
     do
-        if ! curl -sL --fail https://raw.githubusercontent.com/containers-ai/prophetstor/${tag_number}/deploy/example/${pool}/${alamedascaler_filename} -O; then
-            echo -e "\n$(tput setaf 1)Abort, download $alamedascaler_filename sample file from $pool folder failed!!!$(tput sgr 0)"
-            exit 3
-        fi
+        cp $tgz_folder_name/deploy/example/$pool/$alamedascaler_filename .
         if [ "$pool" = "kafka" ]; then
             mv $alamedascaler_filename alamedascaler_kafka.yaml
         elif [ "$pool" = "nginx" ]; then
@@ -1133,23 +1136,33 @@ if [ "$need_upgrade" = "y" ];then
 fi
 
 if [ "$offline_mode_enabled" != "y" ]; then
-    operator_files=`curl --silent https://api.github.com/repos/containers-ai/prophetstor/contents/deploy/upstream?ref=${tag_number} 2>&1|grep "\"name\":"|cut -d ':' -f2|cut -d '"' -f2`
-    if [ "$operator_files" = "" ]; then
-        echo -e "\n$(tput setaf 1)Abort, download operator file list failed!!!$(tput sgr 0)"
+    echo -e "\n$(tput setaf 2)Downloading ${tag_number} tgz file ...$(tput sgr 0)"
+    tgz_name="${tag_number}.tar.gz"
+    if ! curl -sL --fail https://github.com/containers-ai/prophetstor/archive/${tgz_name} -O; then
+        echo -e "\n$(tput setaf 1)Error, download file $tgz_name failed!!!$(tput sgr 0)"
         echo "Please check tag name and network"
         exit 1
     fi
 
-    for file in `echo $operator_files`
-    do
-        echo "Downloading file $file ..."
-        if ! curl -sL --fail https://raw.githubusercontent.com/containers-ai/prophetstor/${tag_number}/deploy/upstream/${file} -O; then
-            echo -e "\n$(tput setaf 1)Abort, download file failed!!!$(tput sgr 0)"
-            echo "Please check tag name and network"
-            exit 1
-        fi
-        echo "Done"
-    done
+    tar -zxf $tgz_name
+    if [ "$?" != "0" ];then
+        echo -e "\n$(tput setaf 1)Error, untar $tgz_name file failed!!!$(tput sgr 0)"
+        exit 3
+    fi
+
+    tgz_folder_name=$(tar -tzf $tgz_name | head -1 | cut -f1 -d"/")
+    if [ "$tgz_folder_name" = "" ]; then
+        echo -e "\n$(tput setaf 1)Error, failed to get extracted directory name.$(tput sgr 0)"
+        exit 3
+    fi
+
+    cp $tgz_folder_name/deploy/upstream/* .
+
+    if [[ "`ls [00-11]*.yaml 2>/dev/null|wc -l`" -lt "12" ]]; then
+        echo -e "\n$(tput setaf 1)Abort, operator files number is less than 12.$(tput sgr 0)"
+        exit 1
+    fi
+    echo "Done"
 else
     # Offline Mode
     # Copy Federator.ai operator 00-11 yamls
@@ -1273,11 +1286,8 @@ fi
 if [ "$ALAMEDASERVICE_FILE_PATH" = "" ]; then
     alamedaservice_example="alamedaservice_sample.yaml"
     if [ "$offline_mode_enabled" != "y" ]; then
-        echo -e "\nDownloading Federator.ai CR sample files ..."
-        if ! curl -sL --fail https://raw.githubusercontent.com/containers-ai/prophetstor/${tag_number}/deploy/example/${alamedaservice_example} -O; then
-            echo -e "\n$(tput setaf 1)Abort, download alamedaservice sample file failed!!!$(tput sgr 0)"
-            exit 2
-        fi
+        echo -e "\nDownloading Federator.ai alamedaservice sample file ..."
+        cp $tgz_folder_name/deploy/example/$alamedaservice_example .
         download_cr_files
         echo "Done"
         echo -e "\nDownloading Federator.ai alamedascaler sample files ..."
