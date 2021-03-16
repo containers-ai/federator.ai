@@ -452,7 +452,7 @@ if [ "$FEDERATORAI_FILE_PATH" = "" ]; then
     else
         # Ask for input
         default="/opt"
-        read -r -p "$(tput setaf 2)Please input Federator.ai cluster-property-seteup files save path [default: $default]: $(tput sgr 0) " save_path </dev/tty
+        read -r -p "$(tput setaf 2)Please input Federator.ai cluster-property-setup files save path [default: $default]: $(tput sgr 0) " save_path </dev/tty
         save_path=${save_path:-$default}
         save_path=$(echo "$save_path" | tr '[:upper:]' '[:lower:]')
         save_path="$save_path/federatorai"
@@ -461,13 +461,13 @@ else
     save_path="$FEDERATORAI_FILE_PATH"
 fi
 
-file_folder="$save_path/cluster-property-seteup"
+file_folder="$save_path/cluster-property-setup"
 if [ -d "$file_folder" ]; then
     rm -rf $file_folder
 fi
 mkdir -p $file_folder
 if [ ! -d "$file_folder" ]; then
-    echo -e "\n$(tput setaf 1)Error! Failed to create folder to save Federator.ai cluster-property-seteup files.$(tput sgr 0)"
+    echo -e "\n$(tput setaf 1)Error! Failed to create folder to save Federator.ai cluster-property-setup files.$(tput sgr 0)"
     exit 3
 fi
 current_location=`pwd`
